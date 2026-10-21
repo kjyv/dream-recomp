@@ -117,6 +117,44 @@ TEST_CASE("memory: store queues flush to the area QACR selects") {
     CHECK(m.faults().total() == 0);
 }
 
+TEST_CASE("memory: with the MMU on, store queues flush through the UTLB, not QACR") {
+    DcMemory m;
+    Recorder ta;
+    m.map_mmio(0x10000000u, 0x10800000u, &ta);
+    // Shinobi's mapping, written through the arrays: 1 MB pages (SZ1 and SZ0 set), valid, shared.
+    m.write32(0xF6000000u, 0xE1000000u | 0x100u);  // entry 0 address: VPN, V
+    m.write32(0xF7000000u, 0x10000000u | 0x1BEu);  // entry 0 data: PPN of the TA FIFO
+    m.write32(0xF6000100u, 0xE0100000u | 0x100u);  // entry 1: onto RAM
+    m.write32(0xF7000100u, 0x0C100000u | 0x1BEu);
+    CHECK(m.read32(0xF6000000u) == (0xE1000000u | 0x100u));
+    m.write32(0xFF000010u, 1u);  // MMUCR.AT
+    for (std::uint32_t i = 0; i < 8; ++i) m.sq_write32(0xE0000000u + 4 * i, 0x300u + i);  // SQ0
+    for (std::uint32_t i = 0; i < 8; ++i) m.sq_write32(0xE0000020u + 4 * i, 0x400u + i);  // SQ1
+
+    // QACR0 is 0, so without the UTLB this burst would land at 0x01000040.
+    m.sq_flush(0xE1000040u);
+    CHECK(ta.burst_addr == 0x10000040u);
+    REQUIRE(ta.burst.size() == 8);
+    CHECK(ta.burst[0] == 0x300u);
+    m.sq_flush(0xE01000A0u);  // SQ1 -> 0x0C1000A0
+    CHECK(m.read32(0x8C1000A0u) == 0x400u);
+    CHECK(m.sq_tlb_flushes == 2);
+
+    // An address no entry maps takes the QACR route and is counted.
+    m.write32(0xFF000038u, 3u << 2);  // QACR0: area 3 (RAM)
+    m.sq_flush(0xE2000040u);
+    CHECK(m.read32(0x8C000040u) == 0x300u);
+    CHECK(m.sq_tlb_misses == 1);
+
+    // TI invalidates every entry and reads back as 0.
+    m.write32(0xFF000010u, 1u | 4u);
+    CHECK(m.read32(0xFF000010u) == 1u);
+    m.sq_flush(0xE1000080u);  // SQ0, now through QACR0 into RAM
+    CHECK(m.read32(0x8C000080u) == 0x300u);
+    CHECK(m.sq_tlb_misses == 2);
+    CHECK(m.faults().total() == 0);
+}
+
 TEST_CASE("memory: MMIO dispatch hands physical addresses and sizes to the device") {
     DcMemory m;
     Recorder holly, tmu;

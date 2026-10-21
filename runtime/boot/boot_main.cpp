@@ -789,6 +789,16 @@ std::string report_text(dream::System& sys, dream::hle::Bios& bios, const dream:
                   static_cast<unsigned long long>(sb.sort_dma_starts),
                   static_cast<unsigned long long>(dmac.manual_transfers));
     s += buf;
+    if (sys.memory.sq_tlb_flushes || sys.memory.sq_tlb_misses ||
+        sys.memory.utlb().associative_writes) {
+        std::snprintf(buf, sizeof buf,
+                      "store queues through the UTLB: %llu bursts, %llu misses (QACR used), "
+                      "%llu associative UTLB writes ignored\n",
+                      static_cast<unsigned long long>(sys.memory.sq_tlb_flushes),
+                      static_cast<unsigned long long>(sys.memory.sq_tlb_misses),
+                      static_cast<unsigned long long>(sys.memory.utlb().associative_writes));
+        s += buf;
+    }
     if (sb.ch2_errors) {
         for (const auto* r : {&sb.first_refused, &sb.last_refused}) {
             std::snprintf(buf, sizeof buf,
@@ -1491,7 +1501,7 @@ int main(int argc, char** argv) {
         cpg(0xFFC00000u, 0x10 / 4), rtc(0xFFC80000u, 0x40 / 4);
     dream::mem::NullRegion cache_arrays;
     SerialCapture scif;
-    sys.memory.map_p4(0xF0000000u, 0xF8000000u, &cache_arrays);
+    sys.memory.map_p4(0xF0000000u, 0xF6000000u, &cache_arrays);  // the UTLB arrays are DcMemory's
     sys.memory.map_p4(0xFF800000u, 0xFF800050u, &bsc);
     sys.memory.map_p4(0xFF200000u, 0xFF200024u, &ubc);
     sys.memory.map_p4(0xFFC00000u, 0xFFC00010u, &cpg);

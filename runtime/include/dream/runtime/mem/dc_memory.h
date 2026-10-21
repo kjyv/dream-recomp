@@ -65,6 +65,27 @@ public:
     void write(std::uint32_t, std::uint32_t, unsigned) override {}
 };
 
+// The SH-4 unified TLB as its memory-mapped arrays expose it (SH7750 hardware manual 3.7): the
+// address array at 0xF6000000, data array 1 at 0xF7000000 and data array 2 at 0xF7800000, entry n
+// at offset n << 8. Katana's Shinobi fills it through these arrays to map the store-queue area onto
+// the TA FIFO and RAM. Only store-queue flushes translate through it (DcMemory::sq_flush); ASIDs
+// are not compared, which is right for the shared entries that code writes.
+class Utlb final : public MmioHandler {
+public:
+    std::uint32_t read(std::uint32_t addr, unsigned size) override;
+    void write(std::uint32_t addr, std::uint32_t value, unsigned size) override;
+    // The physical address a valid entry maps va to, or false when none does.
+    bool translate(std::uint32_t va, std::uint32_t& pa) const noexcept;
+    void invalidate() noexcept;  // MMUCR.TI
+    // Address-array writes with the associative bit set, which compare instead of index. Not
+    // modelled; counted so a title that relies on them shows up.
+    std::uint64_t associative_writes = 0;
+
+private:
+    static constexpr std::uint32_t kValid = 0x100u;  // shared by the address and data arrays
+    std::uint32_t addr_[64]{}, data1_[64]{}, data2_[64]{};
+};
+
 struct FaultRecord {
     std::uint32_t addr;
     unsigned size;
@@ -199,6 +220,11 @@ public:
     void set_qacr(unsigned n, std::uint32_t v) noexcept { qacr_[n & 1] = v & 0x1Cu; }
     std::uint32_t qacr(unsigned n) const noexcept { return qacr_[n & 1]; }
 
+    // With MMUCR.AT set, store-queue flushes go through the UTLB instead of QACR.
+    Utlb& utlb() noexcept { return utlb_; }
+    std::uint64_t sq_tlb_flushes = 0;  // bursts the UTLB translated
+    std::uint64_t sq_tlb_misses = 0;   // bursts it did not map; QACR used instead
+
     // Memory interface
     std::uint8_t read8(std::uint32_t a) override;
     std::uint16_t read16(std::uint32_t a) override;
@@ -239,6 +265,7 @@ private:
     std::uint32_t qacr_[2]{};
     std::uint32_t ccn_[16]{};  // PTEH..QACR1 word registers at 0xFF000000 + 4n (CCR, TRA, EXPEVT,
                                // INTEVT, QACR aliased)
+    Utlb utlb_;
     FaultLog faults_;
 };
 
