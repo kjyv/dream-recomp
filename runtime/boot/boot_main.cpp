@@ -1073,6 +1073,8 @@ void usage(const char* argv0, std::FILE* out) {
         "  --bindings FILE        controller bindings; the default is one file per user, shared\n"
         "                         by every title. F1 (or a pad's select button) opens the screen\n"
         "                         that edits them, and writes them back here.\n"
+        "  --bios FILE            a 2 MB boot ROM image. Titles draw system text with its font;\n"
+        "                         without it that text is blank. The BIOS calls stay native\n"
         "  --vmu FILE             a 128 KB memory-card image; writes are saved back to it.\n"
         "  --flash FILE           a 128 KB console flash image; without it one is synthesised\n"
         "                         Created, blank and formatted, if the path does not exist. A "
@@ -1160,6 +1162,9 @@ int main(int argc, char** argv) {
     bool bindings_file_set = false;
     std::string flash_dump;           // --dump-flash FILE: write the flash out at the stop, so a
                                       // synthesised one can be compared against a reference.
+    std::string bios_image;           // --bios FILE: the owner's 2 MB boot ROM. Only its data is
+                                      // used: the font call returns an address in it. The BIOS
+                                      // calls stay native. Never committed: owner data.
     std::string flash_image;          // --flash FILE: a 128 KB console flash image. The runtime
                                       // synthesises one when this is absent, which is enough for
                                       // some titles and not others: a title that reads the user's
@@ -1260,6 +1265,8 @@ int main(int argc, char** argv) {
         } else if (!std::strcmp(argv[i], "--bindings") && i + 1 < argc) {
             bindings_file = argv[++i];
             bindings_file_set = true;
+        } else if (!std::strcmp(argv[i], "--bios") && i + 1 < argc) {
+            bios_image = argv[++i];
         } else if (!std::strcmp(argv[i], "--flash") && i + 1 < argc) {
             flash_image = argv[++i];
         } else if (!std::strcmp(argv[i], "--dump-flash") && i + 1 < argc) {
@@ -1367,6 +1374,19 @@ int main(int argc, char** argv) {
     dream::System sys;
     dream::hle::Bios bios(sys);
     bios.attach_disc(disc.get());
+    if (!bios_image.empty()) {
+        std::ifstream f(bios_image, std::ios::binary);
+        std::vector<char> raw((std::istreambuf_iterator<char>(f)),
+                              std::istreambuf_iterator<char>());
+        if (raw.size() != dream::mem::DcMemory::kBiosSize) {
+            std::fprintf(stderr, "--bios %s: expected %u bytes, got %zu\n", bios_image.c_str(),
+                         dream::mem::DcMemory::kBiosSize, raw.size());
+            return 2;
+        }
+        std::memcpy(sys.memory.bios(), raw.data(), raw.size());
+        std::printf("bios: loaded %s (its data only; the BIOS calls stay native)\n",
+                    bios_image.c_str());
+    }
     // Load the flash before setup_boot: Bios::install() formats a synthetic one only when the
     // factory string is not already present, so an image loaded here is used as it stands.
     if (!flash_image.empty()) {
