@@ -724,10 +724,12 @@ struct Mixer::Channel {
         switch (offset) {
             case 0x00:  // PCMS, SA
             case 0x01:  // KYONEX, KYONB, SSCTL, LPCTL, PCMS
+                // The ARM7DI has no halfword store: a driver writes this register with STR (size
+                // 4, covering it) or STRB. Ikaruga's sound driver keys every voice on with STR.
                 update_stream_step();
-                if (offset == 0 || size == 2)
+                if (offset == 0 || size >= 2)
                     update_sa();
-                if ((offset == 1 || size == 2) && ccd->KYONEX) {
+                if ((offset == 1 || size >= 2) && ccd->KYONEX) {
                     ccd->KYONEX = 0;
                     for (unsigned i = 0; i < 64; ++i) {
                         Channel& ch = mixer->chans_[i];
