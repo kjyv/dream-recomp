@@ -220,6 +220,7 @@ bool recover_switch(const Image& img, std::uint32_t block_start, std::uint32_t j
     out.table = base;
     out.relative_to_pc = jump.op == Op::BRAF;
     out.relative_to_table = table_relative;
+    out.rebased = false;
     out.targets.clear();
 
     for (unsigned k = 0; k < max_entries; ++k) {
@@ -238,13 +239,16 @@ bool recover_switch(const Image& img, std::uint32_t block_start, std::uint32_t j
             target = jump_pc + 4 + static_cast<std::uint32_t>(entry);
         else if (out.relative_to_table)
             target = base + static_cast<std::uint32_t>(entry);
-        else
-            target = static_cast<std::uint32_t>(entry);
+        else  // SHC writes P1 addresses into the table, whatever segment the image is linked at
+            target = rebase_to_segment(static_cast<std::uint32_t>(entry), range_lo);
         if (target < range_lo || target >= range_hi || (target & 1))
             break;
         // A table entry that lands on the table itself is a data word, not a target.
         if (target >= base && target < base + (k + 1) * out.entry_size)
             break;
+        if (target != static_cast<std::uint32_t>(entry) && !out.relative_to_pc &&
+            !out.relative_to_table)
+            out.rebased = true;
         out.targets.push_back(target);
     }
     return !out.targets.empty();

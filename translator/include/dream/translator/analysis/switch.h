@@ -13,12 +13,23 @@
 namespace dream::translator {
 
 struct SwitchTable {
-    std::uint32_t table = 0;             // address of the first entry
-    std::uint8_t entry_size = 4;         // 1, 2 or 4 bytes
-    bool relative_to_pc = false;         // braf: target = jump_pc + 4 + entry
-    bool relative_to_table = false;      // jmp with add: target = table + entry
+    std::uint32_t table = 0;         // address of the first entry
+    std::uint8_t entry_size = 4;     // 1, 2 or 4 bytes
+    bool relative_to_pc = false;     // braf: target = jump_pc + 4 + entry
+    bool relative_to_table = false;  // jmp with add: target = table + entry
+    // Absolute entries name their targets through another alias of the same RAM (P1 0x8C... for
+    // an image modelled at 0x0C...). Targets are rebased into the range's segment, so the
+    // dispatch rebases the jump register too (rebase_to_segment).
+    bool rebased = false;
     std::vector<std::uint32_t> targets;  // resolved code addresses, in table order
 };
+
+// `a` in the segment of `ref`. P0 to P3 all map the same physical memory, P4 maps none of it.
+inline std::uint32_t rebase_to_segment(std::uint32_t a, std::uint32_t ref) noexcept {
+    if (a >= 0xE0000000u || ref >= 0xE0000000u)
+        return a;
+    return (a & 0x1FFFFFFFu) | (ref & 0xE0000000u);
+}
 
 // Try to recover the table behind a `braf`/`jmp @Rn` at `jump_pc` whose block starts at
 // `block_start`. Targets are accepted while they fall inside [range_lo, range_hi) and are even;

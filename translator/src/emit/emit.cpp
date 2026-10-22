@@ -988,7 +988,11 @@ private:
                 auto it = switches_.find(pc);
                 if (it != switches_.end()) {
                     ++result_.switches_recovered;
-                    out << "        switch (target) {\n";
+                    if (it->second.rebased)  // rebase_to_segment(target, spec_.entry)
+                        out << "        switch (target < 0xE0000000u ? (target & 0x1FFFFFFFu) | "
+                            << hexu(spec_.entry & 0xE0000000u) << " : target) {\n";
+                    else
+                        out << "        switch (target) {\n";
                     std::set<std::uint32_t> seen;
                     for (std::uint32_t t : it->second.targets) {
                         if (!seen.insert(t).second)
