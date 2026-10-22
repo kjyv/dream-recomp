@@ -2,19 +2,80 @@
 // see whether the decoder and the renderer agree with the hardware, without running the game.
 //
 //   dream_render_view FILE.bin [--width N] [--height N] [--frames N] [--screenshot OUT.ppm]
+//   dream_render_view FILE.bin --stats [--regs FILE.vram.regs]
 //
-// Capture a FILE with `crazytaxi_boot --dump-ta FILE`.
+// Capture a FILE with `crazytaxi_boot --dump-ta FILE`. --stats prints which render features the
+// frame uses, per list, and the fog registers, without opening a window.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <vector>
 
 #include "dream/render/background.h"
 #include "dream/render/display_list.h"
 #include "dream/render/framebuffer.h"
+#include "dream/render/tsp.h"
 #include "dream/render/vk/renderer.h"
 #include "dream/render/vk/window.h"
+
+namespace {
+
+void print_stats(const dream::render::Frame& frame, const char* regs_path) {
+    static const char* kLists[] = {"opaque", "opaque modifier", "translucent",
+                                   "translucent modifier", "punch-through"};
+    static const char* kFog[] = {"table", "per-vertex", "none", "table mode 2"};
+    for (unsigned l = 0; l < dream::render::kListCount; ++l) {
+        const auto& list = frame.lists[l];
+        if (list.empty())
+            continue;
+        unsigned fog[4] = {}, use_alpha = 0, clamp = 0, textured = 0, shadow = 0, two_volumes = 0;
+        std::map<std::pair<unsigned, unsigned>, unsigned> blend;
+        for (const dream::render::Polygon& p : list) {
+            ++fog[dream::render::tsp_fog_control(p.tsp)];
+            use_alpha += dream::render::tsp_use_alpha(p.tsp);
+            clamp += dream::render::tsp_colour_clamp(p.tsp);
+            textured += (p.pcw >> 3) & 1u;     // parameter control word: Texture
+            two_volumes += (p.pcw >> 6) & 1u;  // Volume
+            shadow += (p.pcw >> 7) & 1u;       // Shadow
+            ++blend[{dream::render::tsp_src_instr(p.tsp), dream::render::tsp_dst_instr(p.tsp)}];
+        }
+        std::printf(
+            "%s: %zu polygons, %u textured, %u use alpha, %u colour clamp, %u shadow, %u "
+            "two volumes\n",
+            kLists[l], list.size(), textured, use_alpha, clamp, shadow, two_volumes);
+        std::printf("  fog:");
+        for (unsigned f = 0; f < 4; ++f)
+            if (fog[f])
+                std::printf(" %s %u", kFog[f], fog[f]);
+        std::printf("\n  blend src/dst:");
+        for (const auto& [k, n] : blend) std::printf(" %u/%u x%u", k.first, k.second, n);
+        std::printf("\n");
+    }
+    if (!frame.modifiers.empty()) {
+        std::map<unsigned, unsigned> instr;
+        for (const dream::render::ModifierTriangle& t : frame.modifiers) ++instr[t.isp >> 29];
+        std::printf("modifier triangles: %zu, by volume instruction:", frame.modifiers.size());
+        for (const auto& [k, n] : instr) std::printf(" %u x%u", k, n);
+        std::printf("\n");
+    }
+    if (!regs_path)
+        return;
+    std::ifstream r(regs_path, std::ios::binary);
+    std::vector<std::uint32_t> regs(0x2000 / 4, 0);
+    r.read(reinterpret_cast<char*>(regs.data()), 0x2000);
+    if (!r)
+        return;
+    std::printf("FOG_COL_RAM %06x FOG_COL_VERT %06x FOG_DENSITY %04x FOG_CLAMP_MAX %08x MIN %08x\n",
+                regs[0xB0 / 4] & 0xFFFFFFu, regs[0xB4 / 4] & 0xFFFFFFu, regs[0xB8 / 4] & 0xFFFFu,
+                regs[0xBC / 4], regs[0xC0 / 4]);
+    std::printf("FOG_TABLE first 8 entries:");
+    for (unsigned i = 0; i < 8; ++i) std::printf(" %04x", regs[0x200 / 4 + i] & 0xFFFFu);
+    std::printf("\n");
+}
+
+}  // namespace
 
 int main(int argc, char** argv) {
     const char* path = nullptr;
@@ -23,6 +84,8 @@ int main(int argc, char** argv) {
     const char* screenshot = nullptr;
     bool fit = false, all_lists = false, show_framebuffer = false;
     const char* vram_path = nullptr;
+    bool stats = false;
+    const char* regs_path = nullptr;
     dream::render::vk::FrameGeometry geometry;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--frames") && i + 1 < argc)
@@ -43,6 +106,10 @@ int main(int argc, char** argv) {
             all_lists = true;
         else if (!std::strcmp(argv[i], "--vram") && i + 1 < argc)
             vram_path = argv[++i];
+        else if (!std::strcmp(argv[i], "--stats"))
+            stats = true;
+        else if (!std::strcmp(argv[i], "--regs") && i + 1 < argc)
+            regs_path = argv[++i];
         else if (argv[i][0] != '-')
             path = argv[i];
     }
@@ -73,6 +140,10 @@ int main(int argc, char** argv) {
     std::printf("  opaque %zu, translucent %zu, punch-through %zu, modifier triangles %zu\n",
                 frame.lists[0].size(), frame.lists[2].size(), frame.lists[4].size(),
                 frame.modifiers.size());
+    if (stats) {
+        print_stats(frame, regs_path);
+        return 0;
+    }
 
     if (fit) {
         float xmin = 1e30f, xmax = -1e30f, ymin = 1e30f, ymax = -1e30f;
@@ -124,6 +195,7 @@ int main(int argc, char** argv) {
             palette_ram = pvr_regs.data() + 0x1000 / 4;
             // PT_ALPHA_REF at +0x11C: the punch-through threshold the guest chose.
             geometry.alpha_ref = static_cast<float>(pvr_regs[0x11C / 4] & 0xFFu) / 255.0f;
+            dream::render::describe_fog(pvr_regs.data(), geometry.fog);
         }
         renderer.set_memory(vram.data(), vram.size(), palette_ram, palette_format);
         if (!pvr_regs.empty() && dream::render::add_background(decoder.frame(), pvr_regs.data(),

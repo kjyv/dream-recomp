@@ -167,6 +167,8 @@ struct Live {
         const dream::render::Frame& frame = decoder.frame();
         // PT_ALPHA_REF: the punch-through threshold the guest chose, which changes per scene.
         geometry.alpha_ref = static_cast<float>(pvr_.reg(0x11C) & 0xFFu) / 255.0f;
+        // The fog registers and table, which the title can change at any time.
+        dream::render::describe_fog(pvr_.reg_block(), geometry.fog);
         // Palette memory is re-read every render but only invalidates the cache when it has
         // actually changed, which is rare; dropping it every frame would decode every texture
         // every frame.

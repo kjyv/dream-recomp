@@ -227,10 +227,19 @@ of a scaled depth, giving sixteen entries per doubling. A linear index would spe
 on the far half of the world as on the near, and the near half is the half anyone looks at. That is
 also pinned as arithmetic rather than judged as a picture.
 
-The data layer is done and tested; the shader that consumes it is not written yet, because there is
-no captured frame with fog actually enabled to check it against. Crazy Taxi's menus set the density
-to 2^-113, which is off. That needs a frame from the city, which currently needs the crash below
-fixed first.
+The fragment shader applies all four modes. The frame's registers and table go to a uniform buffer
+(set 1), and each polygon's two fog bits and its colour-clamp bit go in the push constant. The
+shader builds the table index with the same arithmetic as `fog_table_index`. Each table entry
+holds the factor where its stretch of depth starts (high byte) and where it ends (low byte), and the
+end equals the next entry's start, so the shader interpolates between the two by the mantissa's
+fraction. Colour clamp (FOG_CLAMP_MIN and MAX) is applied before fog, as Flycast does.
+
+Crazy Taxi's menus set the density to 2^-113, which is off. Ikaruga's first stage is the first
+title checked with fog on: in a frame from stage 1, 575 of 1,085 polygons use table fog towards
+FOG_COL_RAM `#C89164`. Without the shader, the cloud layer behind the play field came out grey; with
+it, the far layers take the stage's orange haze and the near geometry stays clear.
+`dream_render_view FILE --stats --regs FILE.vram.regs` prints which fog modes, blend modes and
+modifier volumes a captured frame uses.
 
 ## The background plane (`render/background.{h,cpp}`)
 

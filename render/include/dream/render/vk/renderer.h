@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "dream/render/display_list.h"
+#include "dream/render/fog.h"
 #include "dream/render/vk/context.h"
 #include "dream/render/vk/resources.h"
 #include "dream/render/vk/texture_cache.h"
@@ -26,6 +27,8 @@ struct FrameGeometry {
     float width = 640, height = 480;
     // The punch-through threshold, from the hardware's PT_ALPHA_REF register (PVR + 0x11C).
     float alpha_ref = 1.0f / 255.0f;
+    // The fog registers and table (describe_fog). The default fogs nothing: a zero table.
+    FogSettings fog;
 };
 
 class Renderer {
@@ -90,6 +93,12 @@ private:
     TextureCache textures_;
     std::unordered_map<std::uint64_t, VkDescriptorSet> frame_sets_;
     VkDescriptorSet fallback_set_ = VK_NULL_HANDLE;
+    // Set 1: the frame's fog registers and table, one uniform buffer rewritten per frame like the
+    // vertices.
+    VkDescriptorSetLayout fog_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool fog_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSet fog_set_ = VK_NULL_HANDLE;
+    HostBuffer fog_buffer_;
     HostBuffer vertices_;
     std::vector<float> staging_;  // vertex data in the shader's layout
     std::string error_;
