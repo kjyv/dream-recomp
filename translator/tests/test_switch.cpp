@@ -67,3 +67,30 @@ TEST_CASE("switch: P4 entries are not an alias of RAM") {
     SwitchTable sw;
     CHECK_FALSE(recover(img, sw));
 }
+
+TEST_CASE("switch: the index check bounds the table") {
+    // +00 mov #1,r2 / +02 cmp/hi r2,r1 / +04 nop / +06 shll2 r1 / +08 mova tbl,r0
+    // +0A mov.l @(r0,r1),r0 / +0C jmp @r0 / +0E nop / +14 tbl: three in-range words / +20.. rts
+    Image img;
+    img.base = 0x8C010000u;
+    auto put16 = [&](std::uint16_t v) {
+        img.bytes.push_back(static_cast<std::uint8_t>(v));
+        img.bytes.push_back(static_cast<std::uint8_t>(v >> 8));
+    };
+    for (std::uint16_t w : std::initializer_list<std::uint16_t>{
+             0xE201, 0x3126, 0x0009, 0x4108, 0xC702, 0x001E, 0x402B, 0x0009, 0x0000, 0x0000})
+        put16(w);
+    for (std::uint32_t off : {0x20u, 0x24u, 0x28u}) {
+        put16(static_cast<std::uint16_t>(img.base + off));
+        put16(static_cast<std::uint16_t>((img.base + off) >> 16));
+    }
+    for (std::uint16_t w :
+         std::initializer_list<std::uint16_t>{0x000B, 0x0009, 0x000B, 0x0009, 0x000B, 0x0009})
+        put16(w);
+    const std::uint32_t jump_pc = img.base + 0x0C;
+    SwitchTable sw;
+    REQUIRE(recover_switch(img, img.base, jump_pc, dream::sh4::decode(img.read16(jump_pc)),
+                           img.base, img.base + static_cast<std::uint32_t>(img.bytes.size()), sw));
+    REQUIRE(sw.targets.size() == 2);
+    CHECK(sw.targets[1] == 0x8C010024u);
+}

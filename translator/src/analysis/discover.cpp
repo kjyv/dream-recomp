@@ -45,7 +45,10 @@ public:
         r.pointer_candidates = pointer_candidates_;
         r.pointer_accepted = pointer_accepted_;
         r.switches = switches_;
-        r.switch_sites.assign(switch_sites_.begin(), switch_sites_.end());
+        for (const auto& [site, targets] : switch_sites_) {
+            r.switch_sites.push_back(site);
+            r.switch_tables[site] = targets;
+        }
         for (const auto& [addr, u] : unresolved_) {
             (void)addr;
             r.unresolved.push_back(u);
@@ -232,7 +235,7 @@ private:
                         const std::uint32_t img_hi =
                             img_.base + static_cast<std::uint32_t>(img_.bytes.size());
                         if (recover_switch(img_, block_start, pc, ins, img_lo, img_hi, sw)) {
-                            if (switch_sites_.insert(pc).second)
+                            if (switch_sites_.emplace(pc, sw.targets).second)
                                 ++switches_;
                             for (std::uint32_t t : sw.targets) {  // local cases
                                 work.push_back(t);
@@ -449,7 +452,7 @@ private:
     std::vector<std::pair<std::uint32_t, std::string>> work_;
     std::set<std::uint32_t> slots_;  // delay slots of every walked branch
     std::size_t pointer_candidates_ = 0, pointer_accepted_ = 0, switches_ = 0;
-    std::set<std::uint32_t> switch_sites_;
+    std::map<std::uint32_t, std::vector<std::uint32_t>> switch_sites_;  // site -> case targets
     // Keyed by address so a site walked more than once -- functions can share tails -- is recorded
     // once rather than per visit.
     std::map<std::uint32_t, UnresolvedIndirect> unresolved_;
@@ -484,6 +487,16 @@ std::string to_json(const DiscoverResult& r, const Image& image) {
     // Every control transfer through a register whose target could not be established. This is the
     // measurable form of a discovery gap: a heuristic is worth writing when it shortens this list,
     // and worth keeping when it shortens it without changing behaviour.
+    // The case targets of each recovered table, so a decompiler can be given the same tables
+    // instead of finding the cases as functions of their own.
+    o << "],\n  \"switch_tables\": [";
+    std::size_t k = 0;
+    for (const auto& [site, targets] : r.switch_tables) {
+        o << (k++ ? "," : "") << "\n    {\"site\": \"" << hex(site) << "\", \"targets\": [";
+        for (std::size_t i = 0; i < targets.size(); ++i)
+            o << (i ? ", " : "") << "\"" << hex(targets[i]) << "\"";
+        o << "]}";
+    }
     o << "],\n  \"unresolved_indirect\": [\n";
     for (std::size_t i = 0; i < r.unresolved.size(); ++i) {
         const auto& u = r.unresolved[i];
