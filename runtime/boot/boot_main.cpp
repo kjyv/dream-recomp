@@ -1099,6 +1099,9 @@ void usage(const char* argv0, std::FILE* out) {
         "  --rtc-seed N           fix the console clock so two runs do the same thing\n"
         "  --press B@F[,B@F...]   hold a button for 8 frames from frame F (a b c x y z start\n"
         "                         up down left right), to get past screens that wait for input\n"
+        "  --record-input FILE    write the controller state of every frame where it changes\n"
+        "  --replay-input FILE    play a recording back instead of reading the controls. With the\n"
+        "                         same --rtc-seed, boot ROM and memory-card image the run repeats\n"
         "\n"
         "Reporting what happened:\n"
         "  --report FILE          write the end-of-run report to a file as well as stdout\n"
@@ -1184,6 +1187,10 @@ int main(int argc, char** argv) {
     // frame, so a headless run can get past "press start" screens. Names: a b c x y z start up
     // down left right.
     std::string presses;
+    // --record-input FILE / --replay-input FILE: the controller state the Maple poll sees, one line
+    // per frame where it changes. The run is deterministic, so a replay repeats a played session,
+    // at any speed, with or without a window.
+    std::string record_input, replay_input;
     // --window: open a window and play. Without it the run is headless exactly as before.
     // --scale N draws the geometry at N times the guest's resolution; the frame is resampled back
     // into the guest's framebuffer, so the guest never learns its screen changed size.
@@ -1277,6 +1284,10 @@ int main(int argc, char** argv) {
             dump_ta_frame = std::strtoull(argv[++i], nullptr, 0);
         else if (!std::strcmp(argv[i], "--dump-ta-at-frame") && i + 1 < argc)
             dump_ta_at_frame = std::strtoull(argv[++i], nullptr, 0);
+        else if (!std::strcmp(argv[i], "--record-input") && i + 1 < argc)
+            record_input = argv[++i];
+        else if (!std::strcmp(argv[i], "--replay-input") && i + 1 < argc)
+            replay_input = argv[++i];
         else if (!std::strcmp(argv[i], "--press") && i + 1 < argc)
             presses = argv[++i];
         else if (!std::strcmp(argv[i], "--max-seconds") && i + 1 < argc)
@@ -1603,14 +1614,72 @@ int main(int argc, char** argv) {
                     scripted.push_back({frame, n.bit});
         }
     }
+    // Recorded controller states: frame, buttons, triggers, sticks. Recorded and replayed right
+    // before the Maple poll, so the file holds what the title read, whatever produced it.
+    using Pad = dream::maple::ControllerState;
+    std::vector<std::pair<std::uint64_t, Pad>> replayed;
+    std::size_t replay_next = 0;
+    if (!replay_input.empty()) {
+        std::ifstream rec(replay_input);
+        if (!rec) {
+            std::fprintf(stderr, "--replay-input %s: cannot read it\n", replay_input.c_str());
+            return 2;
+        }
+        std::string line;
+        while (std::getline(rec, line)) {
+            unsigned long long f = 0;
+            unsigned b = 0, rt = 0, lt = 0, x = 0, y = 0, x2 = 0, y2 = 0;
+            if (line.empty() || line[0] == '#' ||
+                std::sscanf(line.c_str(), "%llu %x %u %u %u %u %u %u", &f, &b, &rt, &lt, &x, &y,
+                            &x2, &y2) != 8)
+                continue;
+            Pad p;
+            p.buttons = static_cast<std::uint16_t>(b);
+            p.rtrigger = static_cast<std::uint8_t>(rt);
+            p.ltrigger = static_cast<std::uint8_t>(lt);
+            p.joy_x = static_cast<std::uint8_t>(x);
+            p.joy_y = static_cast<std::uint8_t>(y);
+            p.joy2_x = static_cast<std::uint8_t>(x2);
+            p.joy2_y = static_cast<std::uint8_t>(y2);
+            replayed.push_back({f, p});
+        }
+        std::printf("input: replaying %zu controller changes from %s\n", replayed.size(),
+                    replay_input.c_str());
+    }
+    std::FILE* record_file = nullptr;
+    std::uint64_t recorded = 0;
+    Pad last_recorded;
+    if (!record_input.empty()) {
+        record_file = std::fopen(record_input.c_str(), "w");
+        if (!record_file) {
+            std::fprintf(stderr, "--record-input %s: cannot write it\n", record_input.c_str());
+            return 2;
+        }
+        std::fprintf(record_file, "# frame buttons rtrigger ltrigger joy_x joy_y joy2_x joy2_y\n");
+    }
     sys.spg.on_vblank_out = [&] {
+        const std::uint64_t f = sys.spg.frames();
+        while (replay_next < replayed.size() && replayed[replay_next].first <= f)
+            pad_ptr->state = replayed[replay_next++].second;
         if (!scripted.empty()) {
-            const std::uint64_t f = sys.spg.frames();
             std::uint16_t held = 0;
             for (const auto& [start, bit] : scripted)
                 if (f >= start && f < start + 8)
                     held |= bit;
             pad_ptr->state.buttons = static_cast<std::uint16_t>(0xFFFFu & ~held);
+        }
+        if (record_file) {
+            const Pad& p = pad_ptr->state;
+            if (recorded == 0 || p.buttons != last_recorded.buttons ||
+                p.rtrigger != last_recorded.rtrigger || p.ltrigger != last_recorded.ltrigger ||
+                p.joy_x != last_recorded.joy_x || p.joy_y != last_recorded.joy_y ||
+                p.joy2_x != last_recorded.joy2_x || p.joy2_y != last_recorded.joy2_y) {
+                std::fprintf(record_file, "%llu %04x %u %u %u %u %u %u\n",
+                             static_cast<unsigned long long>(f), p.buttons, p.rtrigger, p.ltrigger,
+                             p.joy_x, p.joy_y, p.joy2_x, p.joy2_y);
+                last_recorded = p;
+                ++recorded;
+            }
         }
         maple.vblank();
     };
@@ -1675,7 +1744,7 @@ int main(int argc, char** argv) {
                 paused_for += std::chrono::steady_clock::now() - paused_at;
             }
             // Scripted presses win while they are held, so --press still works with a window open.
-            if (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu)
+            if (replayed.empty() && (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu))
                 live->read_controls(pad_ptr->state);
             if (unthrottled)
                 return;
@@ -2027,6 +2096,12 @@ int main(int argc, char** argv) {
         std::fclose(hash_file);
         std::printf("wrote %s: %llu writes hashed\n", write_hash.c_str(),
                     static_cast<unsigned long long>(sys.memory.writes_hashed));
+    }
+    if (record_file) {
+        std::fclose(record_file);
+        std::printf("input: recorded %llu controller changes over %llu frames to %s\n",
+                    static_cast<unsigned long long>(recorded),
+                    static_cast<unsigned long long>(sys.spg.frames()), record_input.c_str());
     }
     if (log_file) {
         std::fclose(log_file);
