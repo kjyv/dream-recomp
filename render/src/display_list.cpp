@@ -190,8 +190,15 @@ void DisplayList::feed(const std::uint32_t w[8]) {
             close_list();
             return;
         case kUserTileClip:
+            // Tile numbers, both bounds inclusive.
+            // Reference: Flycast's ta_vtx.cpp (GPL-2.0, ADR 1).
+            clip_x0_ = static_cast<std::uint16_t>((w[4] & 63u) * 32u);
+            clip_y0_ = static_cast<std::uint16_t>((w[5] & 31u) * 32u);
+            clip_x1_ = static_cast<std::uint16_t>(((w[6] & 63u) + 1u) * 32u);
+            clip_y1_ = static_cast<std::uint16_t>(((w[7] & 31u) + 1u) * 32u);
+            return;
         case kObjectListSet:
-            return;  // clipping and object-list placement do not affect what is drawn here
+            return;  // object-list placement does not affect what is drawn here
         case kPolygonOrModVol:
         case kSprite:
             handle_header(w);
@@ -244,6 +251,10 @@ void DisplayList::handle_header(const std::uint32_t w[8]) {
     current_.tsp = w[2];
     current_.tcw = w[3];
     current_.tile_clip = pcw_user_clip(pcw);
+    current_.clip_x0 = clip_x0_;
+    current_.clip_y0 = clip_y0_;
+    current_.clip_x1 = clip_x1_;
+    current_.clip_y1 = clip_y1_;
     current_.first = static_cast<u32>(frame_.vertices.size());
 
     if (pcw_para_type(pcw) == kSprite) {

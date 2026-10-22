@@ -21,6 +21,8 @@ layout(push_constant) uniform Push {
                       // 4 offset colour, 5 alpha test, 6 use alpha, 7-8 fog control,
                       // 9 colour clamp
     float alpha_ref;  // punch-through threshold, from the hardware's own register
+    vec4 clip;        // user clip rectangle in guest pixels: x0, y0, x1, y1
+    int clip_mode;    // 2: draw only inside it, 3: only outside, otherwise ignored
 }
 push;
 
@@ -51,10 +53,18 @@ float fog_factor(float inv_w) {
 layout(location = 0) in vec4 v_base;
 layout(location = 1) in vec4 v_offset;
 layout(location = 2) in vec3 v_uv;
+layout(location = 3) in vec2 v_pos;
 
 layout(location = 0) out vec4 o_colour;
 
 void main() {
+    // The user clip. Ikaruga draws its 3D scene inside the play field only, so the HUD columns on
+    // either side stay black.
+    if (push.clip_mode >= 2) {
+        const bool inside = all(greaterThanEqual(v_pos, push.clip.xy)) && all(lessThan(v_pos, push.clip.zw));
+        if (inside != (push.clip_mode == 2))
+            discard;
+    }
     const float inv_w = v_uv.z;
     vec4 base = v_base / inv_w;
     vec4 offset_colour = v_offset / inv_w;

@@ -53,6 +53,9 @@ struct Polygon {
     // Second volume, for two-volume polygons; 0xFFFFFFFF when unused.
     std::uint32_t tsp1 = 0xFFFFFFFFu, tcw1 = 0xFFFFFFFFu;
     std::uint32_t tile_clip = 0;  // user tile clip mode, from the parameter control word
+    // The user clip rectangle in force at the header, in pixels, right and bottom exclusive. Mode 2
+    // draws only inside it, mode 3 only outside; 0 ignores it.
+    std::uint16_t clip_x0 = 0, clip_y0 = 0, clip_x1 = 0, clip_y1 = 0;
 };
 
 // A modifier volume triangle (shadows and volume effects). These are not strips: each is three
@@ -133,6 +136,8 @@ private:
     // Sprite state: the header's colours apply to all four corners.
     std::uint32_t sprite_base_ = 0xFFFFFFFFu, sprite_offset_ = 0;
     bool in_sprite_ = false;
+    // The last user tile clip parameter, in pixels: a rectangle of 32-pixel tiles.
+    std::uint16_t clip_x0_ = 0, clip_y0_ = 0, clip_x1_ = 0, clip_y1_ = 0;
 };
 
 }  // namespace dream::render

@@ -89,6 +89,9 @@ struct PushConstants {
     float offset[2];
     std::int32_t mode;
     float alpha_ref;
+    float padding[2];  // the shaders' vec4 starts on a 16-byte boundary
+    float clip[4];     // the user clip rectangle in guest pixels: x0, y0, x1, y1
+    std::int32_t clip_mode;
 };
 
 // The fog uniform block, std140. Each table entry is the factor where its stretch of depth starts
@@ -552,6 +555,11 @@ void Renderer::draw(VkCommandBuffer cmd, const Frame& frame, const FrameGeometry
         if (item.blended)
             ++blended_polygons;
         push.alpha_ref = geometry.alpha_ref;
+        push.clip_mode = static_cast<std::int32_t>(p.tile_clip);
+        push.clip[0] = p.clip_x0;
+        push.clip[1] = p.clip_y0;
+        push.clip[2] = p.clip_x1;
+        push.clip[3] = p.clip_y1;
         vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof push, &push);
         vkCmdDraw(cmd, p.count, 1, p.first, 0);

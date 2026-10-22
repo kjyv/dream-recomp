@@ -96,6 +96,35 @@ TEST_CASE("display list: a packed-colour triangle strip becomes one polygon") {
     CHECK(f.unknown_parameters == 0);
 }
 
+TEST_CASE("display list: a polygon keeps the user clip rectangle and its clip mode") {
+    Stream s;
+    Pcw clip;
+    clip.para_type = 1;  // user tile clip: tiles 4 to 15 across, 0 to 14 down, both inclusive
+    s.chunk({clip.word(), 0, 0, 0, 4, 0, 15, 14});
+    Pcw header;
+    const u32 inside = 2u << 16;  // parameter control word: User_Clip, draw inside the rectangle
+    s.chunk({header.word() | inside, 0, 0, 0});
+    packed_vertex(s, 10, 20, 0.5f, 0xFF112233u, false);
+    packed_vertex(s, 30, 20, 0.5f, 0xFF445566u, false);
+    packed_vertex(s, 20, 40, 0.25f, 0xFF778899u, true);
+    Pcw eol;
+    eol.para_type = 0;
+    s.chunk({eol.word()});
+
+    DisplayList dl;
+    s.feed(dl);
+    const Frame& f = dl.frame();
+
+    REQUIRE(f.lists[0].size() == 1);
+    const Polygon& p = f.lists[0][0];
+    CHECK(p.tile_clip == 2);
+    CHECK(p.clip_x0 == 128);
+    CHECK(p.clip_y0 == 0);
+    CHECK(p.clip_x1 == 512);
+    CHECK(p.clip_y1 == 480);
+    CHECK(f.unknown_parameters == 0);
+}
+
 TEST_CASE("display list: strips are split at end-of-strip and lists are kept apart") {
     Stream s;
     Pcw opaque;
