@@ -303,12 +303,15 @@ void DisplayList::handle_vertex(const std::uint32_t w[8], bool have_second_half,
 
     const u32 col = pcw_col_type(pcw);
     const bool textured = pcw_texture(pcw) != 0;
-    const bool offset = pcw_offset(pcw) != 0;
+    // Only a textured vertex has an offset colour. In an untextured one, the word after the base
+    // colour is unused or holds the second volume's colour.
+    const bool offset = textured && pcw_offset(pcw) != 0;
     const bool uv_short = pcw_uv_16bit(pcw) != 0;
 
     // Words 4 and 5 are the texture coordinates when textured. An untextured single-volume vertex
-    // does not use them and keeps its intensity in word 6 (KMVERTEX2), as a textured one does. Only
-    // the untextured two-volume vertex (KMVERTEX10) starts its intensities at word 4.
+    // does not use them and keeps its colour in word 6 (KMVERTEX0, KMVERTEX2), as a textured one
+    // does. Only the untextured two-volume vertex (KMVERTEX9, KMVERTEX10) starts its colours at
+    // word 4.
     unsigned next = 6;
     if (!textured && pcw_volume(pcw)) {
         next = 4;
@@ -327,8 +330,8 @@ void DisplayList::handle_vertex(const std::uint32_t w[8], bool have_second_half,
 
     switch (col) {
         case kPacked:
-            v.base = w[6];
-            v.offset = offset ? w[7] : 0;
+            v.base = w[next];
+            v.offset = offset ? w[next + 1] : 0;
             break;
         case kFloating:
             if (have_second_half) {
@@ -344,10 +347,7 @@ void DisplayList::handle_vertex(const std::uint32_t w[8], bool have_second_half,
         case kIntensityPrev: {
             const float base_i = as_float(w[next]);
             v.base = intensity_colour(face_base_, base_i);
-            // Only a textured vertex has an offset intensity. In an untextured one, the word after
-            // the base intensity is unused or the second volume's intensity.
-            v.offset =
-                offset && textured ? intensity_colour(face_offset_, as_float(w[next + 1])) : 0;
+            v.offset = offset ? intensity_colour(face_offset_, as_float(w[next + 1])) : 0;
             break;
         }
         default:

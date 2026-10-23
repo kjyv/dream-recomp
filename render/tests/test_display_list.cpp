@@ -362,6 +362,33 @@ TEST_CASE("display list: an untextured two-volume vertex keeps its first intensi
     CHECK(((f.vertices[1].base >> 16) & 0xFFu) == 0x80u);
 }
 
+TEST_CASE("display list: an untextured two-volume vertex keeps its first packed colour in word 4") {
+    // Header and vertex are both 32 bytes. Word 5 holds the second volume's colour, and an
+    // untextured vertex has no offset colour even when the offset bit is set.
+    Stream s;
+    Pcw header;
+    header.volume = 1;
+    header.offset = 1;
+    s.chunk({header.word(), 0, 0, 0});
+    for (int i = 0; i < 3; ++i) {
+        Pcw v;
+        v.para_type = 7;
+        v.volume = 1;
+        v.offset = 1;
+        v.end_of_strip = i == 2 ? 1u : 0u;
+        s.chunk({v.word(), f2u(static_cast<float>(i)), f2u(0), f2u(1), 0xFF112233u, 0xFF445566u,
+                 0xFF778899u, 0x80AABBCCu});
+    }
+
+    DisplayList dl;
+    s.feed(dl);
+    const Frame& f = dl.frame();
+    REQUIRE(f.vertices.size() == 3);
+    CHECK(f.vertices[0].base == 0xFF112233u);
+    CHECK(f.vertices[2].base == 0xFF112233u);
+    CHECK(f.vertices[0].offset == 0u);
+}
+
 TEST_CASE("display list: floating-point colours come from the vertex's second half") {
     Stream s;
     Pcw header;
