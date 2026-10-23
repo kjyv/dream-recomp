@@ -220,14 +220,17 @@ u32 mipmap_base_offset(const TextureInfo& info) {
             texels *= 2;
         offset += texels;
     }
-    if (info.vq || info.format == PixelFormat::Palette8)
+    // The loop counts no bytes for the 1x1 level of a VQ or 4-bit chain. In a VQ chain it is one
+    // index byte, with no padding before it. In a 4-bit chain it makes two bytes together with
+    // three texels of padding.
+    if (info.vq)
         return offset + 1u;
     if (info.format == PixelFormat::Palette4)
         return offset + 2u;
-    // A 16-bit chain starts after three texels. A 32x32 chain then ends at 0xAB0, 8-byte aligned
-    // like every texture address, and each of Ikaruga's mip levels matches the next larger level
-    // reduced 2x2. Nothing confirms the padding of the 4- and 8-bit chains above.
-    return offset + 6u;
+    // A 16- or 8-bit chain starts after three texels. It then ends on an 8-byte boundary, like
+    // every texture address. Each of Ikaruga's 16-bit mip levels also matches the next larger level
+    // reduced 2x2 only with this padding.
+    return offset + (info.format == PixelFormat::Palette8 ? 3u : 6u);
 }
 
 u32 unpack_16(PixelFormat format, u16 p) {
