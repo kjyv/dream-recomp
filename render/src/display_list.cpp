@@ -306,9 +306,13 @@ void DisplayList::handle_vertex(const std::uint32_t w[8], bool have_second_half,
     const bool offset = pcw_offset(pcw) != 0;
     const bool uv_short = pcw_uv_16bit(pcw) != 0;
 
-    // Words 4 and 5 are the texture coordinates when textured; otherwise they are ignored.
-    unsigned next = 4;
-    if (textured) {
+    // Words 4 and 5 are the texture coordinates when textured. An untextured single-volume vertex
+    // does not use them and keeps its intensity in word 6 (KMVERTEX2), as a textured one does. Only
+    // the untextured two-volume vertex (KMVERTEX10) starts its intensities at word 4.
+    unsigned next = 6;
+    if (!textured && pcw_volume(pcw)) {
+        next = 4;
+    } else if (textured) {
         if (uv_short) {
             // 16-bit coordinates share one word, v in the low half and u in the high half.
             v.v = uv16(w[4] & 0xFFFFu);
@@ -340,7 +344,10 @@ void DisplayList::handle_vertex(const std::uint32_t w[8], bool have_second_half,
         case kIntensityPrev: {
             const float base_i = as_float(w[next]);
             v.base = intensity_colour(face_base_, base_i);
-            v.offset = offset ? intensity_colour(face_offset_, as_float(w[next + 1])) : 0;
+            // Only a textured vertex has an offset intensity. In an untextured one, the word after
+            // the base intensity is unused or the second volume's intensity.
+            v.offset =
+                offset && textured ? intensity_colour(face_offset_, as_float(w[next + 1])) : 0;
             break;
         }
         default:

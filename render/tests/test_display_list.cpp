@@ -309,6 +309,59 @@ TEST_CASE("display list: intensity mode 2 keeps the previous face colour and a 3
     CHECK(f.vertices[3].base == 0xFFFF8000u);  // the first polygon's face colour, still in force
 }
 
+TEST_CASE("display list: an untextured intensity vertex keeps its intensity in word 6") {
+    // A single-volume vertex does not use words 4 and 5 when it has no texture. Ikaruga's title
+    // screen puts unrelated values there, and reading word 4 darkened every second vertex.
+    Stream s;
+    Pcw header;
+    header.col_type = 2;
+    s.chunk({header.word(), 0, 0, 0, f2u(1.0f), f2u(1.0f), f2u(0.5f), f2u(0.0f)});
+    for (int i = 0; i < 3; ++i) {
+        Pcw v;
+        v.para_type = 7;
+        v.col_type = 2;
+        v.end_of_strip = i == 2 ? 1u : 0u;
+        s.chunk({v.word(), f2u(static_cast<float>(i)), f2u(0), f2u(1), f2u(0.25f), f2u(0.125f),
+                 f2u(i == 0 ? 1.0f : 0.5f), 0});
+    }
+
+    DisplayList dl;
+    s.feed(dl);
+    const Frame& f = dl.frame();
+    REQUIRE(f.vertices.size() == 3);
+    CHECK(f.vertices[0].base == 0xFFFF8000u);
+    CHECK(((f.vertices[1].base >> 16) & 0xFFu) == 0x80u);
+    CHECK(f.vertices[0].offset == 0u);
+}
+
+TEST_CASE("display list: an untextured two-volume vertex keeps its first intensity in word 4") {
+    // Two volumes make the header 64 bytes, with the first volume's face colour in the second
+    // half. The vertex stays 32 bytes, with the two volumes' intensities in words 4 and 5.
+    Stream s;
+    Pcw header;
+    header.col_type = 2;
+    header.volume = 1;
+    s.chunk({header.word(), 0, 0, 0});
+    s.chunk(
+        {f2u(1.0f), f2u(1.0f), f2u(0.5f), f2u(0.0f), f2u(1.0f), f2u(0.0f), f2u(0.0f), f2u(1.0f)});
+    for (int i = 0; i < 3; ++i) {
+        Pcw v;
+        v.para_type = 7;
+        v.col_type = 2;
+        v.volume = 1;
+        v.end_of_strip = i == 2 ? 1u : 0u;
+        s.chunk({v.word(), f2u(static_cast<float>(i)), f2u(0), f2u(1), f2u(i == 0 ? 1.0f : 0.5f),
+                 f2u(0.25f), f2u(0.125f), 0});
+    }
+
+    DisplayList dl;
+    s.feed(dl);
+    const Frame& f = dl.frame();
+    REQUIRE(f.vertices.size() == 3);
+    CHECK(f.vertices[0].base == 0xFFFF8000u);
+    CHECK(((f.vertices[1].base >> 16) & 0xFFu) == 0x80u);
+}
+
 TEST_CASE("display list: floating-point colours come from the vertex's second half") {
     Stream s;
     Pcw header;
