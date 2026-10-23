@@ -155,6 +155,38 @@ TEST_CASE("texture: a twiddled texture reads back in scan order") {
         }
 }
 
+TEST_CASE("texture: a mipmapped 16-bit texture's base level follows the chain and its padding") {
+    // Three texels of padding, then the levels from 1x1 up: a 32x32 base level starts at
+    // 6 + 2 * (1 + 4 + 16 + 64 + 256) = 688 bytes.
+    auto v = vram();
+    TextureInfo info;
+    REQUIRE(
+        describe_texture(make_tcw(0, 1, true, false, /*mipmapped=*/true), make_tsp(2, 2), 0, info));
+    REQUIRE(info.width == 32);
+    // The smaller levels hold white, so a base level read from the wrong place shows it.
+    const u32 base = 688;
+    for (u32 i = 0; i < base; i += 2) put16(v, i, 0xFFFFu);
+    for (u32 y = 0; y < 32; ++y)
+        for (u32 x = 0; x < 32; ++x)
+            put16(v, base + twiddle_index(x, y, 32, 32) * 2,
+                  static_cast<std::uint16_t>((y << 11) | x));
+    std::vector<u32> pixels;
+    std::uint32_t palette[1024] = {};
+    REQUIRE(decode_texture(info, v.data(), v.size(), palette, pixels));
+    // Red carries y and blue carries x.
+    CHECK((pixels[0] & 0x00FF00FFu) == 0u);
+    unsigned wrong = 0;
+    for (u32 y = 0; y < 32; ++y)
+        for (u32 x = 0; x < 32; ++x) {
+            const u32 p = pixels[y * 32 + x];
+            if (((p & 0xFFu) >> 3) != y || (((p >> 16) & 0xFFu) >> 3) != x)
+                ++wrong;
+        }
+    CHECK(wrong == 0);
+    // The chain ends where the base level ends.
+    CHECK(info.size_bytes() == base + 32u * 32u * 2u);
+}
+
 TEST_CASE("texture: indexed formats look up palette memory") {
     auto v = vram();
     std::uint32_t palette_ram[1024] = {};

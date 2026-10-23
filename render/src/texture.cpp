@@ -115,10 +115,11 @@ std::uint32_t twiddle_index(std::uint32_t x, std::uint32_t y, std::uint32_t widt
 std::uint32_t TextureInfo::size_bytes() const noexcept {
     u32 texels = width * height;
     // A mipmapped texture is followed by its whole chain, each level a quarter of the last, which
-    // converges on a third more texels. Rounded up: this bounds an invalidation range, and
-    // guessing low there means a stale texture, which is the worse way to be wrong.
+    // converges on a third more texels, plus up to three texels of padding. Rounded up: this
+    // bounds an invalidation range, and guessing low there means a stale texture, which is the
+    // worse way to be wrong.
     if (mipmapped)
-        texels += texels / 3u + 1u;
+        texels += texels / 3u + 3u;
     if (vq)
         return 256u * 8u + texels / 4u;  // codebook plus one index per 2x2 block
     switch (format) {
@@ -204,7 +205,7 @@ void unpack_palette(const std::uint32_t* palette_ram, PaletteFormat format, std:
 namespace {
 
 // Where the base level of a mipmapped texture starts. The hardware stores the chain smallest
-// first, each level a quarter of the next, with a small fixed offset the size of one texel.
+// first, each level a quarter of the next, after a few bytes of padding.
 u32 mipmap_base_offset(const TextureInfo& info) {
     if (!info.mipmapped)
         return 0;
@@ -219,8 +220,14 @@ u32 mipmap_base_offset(const TextureInfo& info) {
             texels *= 2;
         offset += texels;
     }
-    // The chain begins after a single texel's worth of padding.
-    return offset + (info.vq ? 1u : (info.format == PixelFormat::Palette8 ? 1u : 2u));
+    if (info.vq || info.format == PixelFormat::Palette8)
+        return offset + 1u;
+    if (info.format == PixelFormat::Palette4)
+        return offset + 2u;
+    // A 16-bit chain starts after three texels. A 32x32 chain then ends at 0xAB0, 8-byte aligned
+    // like every texture address, and each of Ikaruga's mip levels matches the next larger level
+    // reduced 2x2. Nothing confirms the padding of the 4- and 8-bit chains above.
+    return offset + 6u;
 }
 
 u32 unpack_16(PixelFormat format, u16 p) {
