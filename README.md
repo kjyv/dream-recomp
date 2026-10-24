@@ -74,7 +74,9 @@ and it is covered under [When it stops](#when-it-stops).
 ## Requirements
 
 - CMake 3.24+, a C++20 compiler (Apple clang, clang 16+, or MSVC 2022), Python 3.9+, git
-- A disc image you dumped yourself, `.chd` or `.gdi`
+- A disc image you dumped yourself, `.chd` or `.gdi`. A self-boot CD-R image (`.cdi`) also runs.
+  The launcher presents it as the GD-ROM that the game was made for. Its boot file usually has
+  patches, so prefer a GD-ROM dump.
 - For a window and sound: Vulkan (MoltenVK on macOS), SDL3, and `glslc`. These are optional;
   without them everything still builds and runs headless.
 
