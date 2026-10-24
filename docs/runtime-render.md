@@ -357,6 +357,16 @@ replace what was decoded from those bytes before. The count it reports is also t
 exposed the problem above: about six textures a frame were being dropped at addresses inside the
 buffer being written.
 
+**A render to texture is always written back.** Bit 24 of `FB_W_SOF1` sends a render through the
+64-bit path, where the texture unit reads. The display reads only the 32-bit path, so such a render
+is never a frame on screen, and its write cannot land on a buffer that the title draws into, as
+Crazy Taxi's did. The launcher writes it back whatever `--framebuffer-writeback` says. It writes only
+the region that `FB_X_CLIP` and `FB_Y_CLIP` give, from the top left of the offscreen image, and
+ARGB1555 gets its alpha bit from the threshold in `FB_W_CTRL`. The frames share the offscreen image,
+so the window keeps the last frame until the next one is drawn. Rez renders a 256x256 texture this
+way between its frames. Without the write-back, the texture kept stale bytes, which showed as
+stripes across Area 1.
+
 **Input.** The window maps a keyboard and any connected pad onto the Maple controller through the
 player's own bindings (`render/input.h`), both live at once. The defaults are the layout the
 launcher always had: arrow keys for the d-pad, `Z` `X` `A` `S` for A, B, X and Y, return for start,
@@ -396,7 +406,7 @@ caught.
    game into a window and presents the buffer the guest nominates, from the renderer when it drew
    that buffer and from video memory otherwise. Writing frames back into video memory is behind
    `--framebuffer-writeback` until the written region can be worked out precisely enough to be
-   safe.
+   safe. A render to texture is the exception: it is always written back.
 
 Enhancements (internal resolution, widescreen, texture replacement) follow step 4 and are per-game
 settings in the title's TOML, since what is safe differs by title. A framerate uplift is *not* a

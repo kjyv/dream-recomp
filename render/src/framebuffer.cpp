@@ -64,6 +64,7 @@ unsigned bytes_per_pixel(FramebufferFormat f) {
         case FramebufferFormat::Rgb555:
         case FramebufferFormat::Rgb565:
         case FramebufferFormat::Argb4444:
+        case FramebufferFormat::Argb1555:
             return 2;
         case FramebufferFormat::Rgb888:
             return 3;
@@ -75,11 +76,12 @@ unsigned bytes_per_pixel(FramebufferFormat f) {
 }  // namespace
 
 std::string FramebufferInfo::describe() const {
-    static const char* kNames[5] = {"RGB555", "RGB565", "RGB888", "ARGB8888", "ARGB4444"};
+    static const char* kNames[6] = {"RGB555",   "RGB565",   "RGB888",
+                                    "ARGB8888", "ARGB4444", "ARGB1555"};
     const unsigned f = static_cast<unsigned>(format);
     char buf[160];
     std::snprintf(buf, sizeof buf, "%ux%u %s at 0x%06x, stride +%u%s", width, height,
-                  kNames[f < 5 ? f : 0], address, modulus, enabled ? "" : " (display off)");
+                  kNames[f < 6 ? f : 0], address, modulus, enabled ? "" : " (display off)");
     return buf;
 }
 
@@ -99,7 +101,8 @@ bool describe_framebuffer(const std::uint32_t* pvr_regs, FramebufferInfo& out) {
     switch (out.format) {
         case FramebufferFormat::Rgb555:
         case FramebufferFormat::Rgb565:
-        case FramebufferFormat::Argb4444:  // FB_R_CTRL's two-bit field cannot name this one
+        case FramebufferFormat::Argb4444:  // FB_R_CTRL's two-bit field cannot name these two
+        case FramebufferFormat::Argb1555:
             out.width = width_words;
             out.modulus = modulus_words;
             break;
@@ -138,7 +141,8 @@ bool decode_framebuffer(const FramebufferInfo& info, const std::uint8_t* vram,
     for (u32 y = 0; y < info.height; ++y) {
         for (u32 x = 0; x < info.width; ++x, at += bpp) {
             switch (info.format) {
-                case FramebufferFormat::Rgb555: {
+                case FramebufferFormat::Rgb555:
+                case FramebufferFormat::Argb1555: {
                     const u16 p = read16(vram + at);
                     out[dst++] = pack_rgba((((p >> 10) & 0x1Fu) << 3) | concat,
                                            (((p >> 5) & 0x1Fu) << 3) | concat,
@@ -188,12 +192,13 @@ bool describe_write_framebuffer(const std::uint32_t* pvr_regs, std::uint32_t wid
     // FB_W_CTRL names seven pixel formats where FB_R_CTRL names four, and numbers them
     // differently: two of them carry alpha in sixteen bits and two more are thirty-two bits with
     // and without it. Rendering does not use the alpha once the frame is on screen, so the two
-    // 32-bit formats and the two 1555-shaped ones collapse together.
+    // 32-bit formats collapse together. ARGB1555 keeps its alpha bit, because a render to texture
+    // is sampled with it.
     static const FramebufferFormat kPack[7] = {
         FramebufferFormat::Rgb555,    // 0: KRGB1555
         FramebufferFormat::Rgb565,    // 1: RGB565
         FramebufferFormat::Argb4444,  // 2: ARGB4444
-        FramebufferFormat::Rgb555,    // 3: ARGB1555
+        FramebufferFormat::Argb1555,  // 3: ARGB1555
         FramebufferFormat::Rgb888,    // 4: RGB888
         FramebufferFormat::Argb8888,  // 5: KRGB0888
         FramebufferFormat::Argb8888,  // 6: ARGB8888
@@ -202,6 +207,8 @@ bool describe_write_framebuffer(const std::uint32_t* pvr_regs, std::uint32_t wid
     if (pack > 6)
         return false;  // 7 is reserved; the hardware does not define what it writes
     out.format = kPack[pack];
+    out.alpha_threshold = (pvr_regs[kFbWCtrl] >> 8) & 0xFFu;
+    out.texture = (pvr_regs[kFbWSof1] & 0x01000000u) != 0;
     out.address = pvr_regs[kFbWSof1] & 0x00FFFFFFu;
     out.width = width;
     out.height = height;
@@ -226,7 +233,7 @@ RenderTarget describe_render_target(const std::uint32_t* pvr_regs) {
 
 bool encode_framebuffer(const FramebufferInfo& info, const std::uint32_t* rgba,
                         std::uint32_t src_width, std::uint32_t src_height, std::uint8_t* vram,
-                        std::size_t vram_size) {
+                        std::size_t vram_size, std::uint32_t src_stride) {
     const unsigned bpp = bytes_per_pixel(info.format);
     const std::size_t needed = static_cast<std::size_t>(info.address) +
                                static_cast<std::size_t>(info.height) *
@@ -241,7 +248,8 @@ bool encode_framebuffer(const FramebufferInfo& info, const std::uint32_t* rgba,
         const u32 sy = src_height == info.height ? y : y * src_height / info.height;
         for (u32 x = 0; x < info.width; ++x, at += bpp) {
             const u32 sx = src_width == info.width ? x : x * src_width / info.width;
-            const u32 p = rgba[static_cast<std::size_t>(sy) * src_width + sx];
+            const u32 p =
+                rgba[static_cast<std::size_t>(sy) * (src_stride ? src_stride : src_width) + sx];
             const u32 r = p & 0xFFu, g = (p >> 8) & 0xFFu, b = (p >> 16) & 0xFFu;
             switch (info.format) {
                 case FramebufferFormat::Rgb555: {
@@ -257,6 +265,13 @@ bool encode_framebuffer(const FramebufferInfo& info, const std::uint32_t* rgba,
                 case FramebufferFormat::Argb4444: {
                     const u16 v =
                         static_cast<u16>(0xF000u | ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4));
+                    std::memcpy(vram + at, &v, 2);
+                    break;
+                }
+                case FramebufferFormat::Argb1555: {
+                    const u16 a = (p >> 24) >= info.alpha_threshold ? 0x8000u : 0u;
+                    const u16 v =
+                        static_cast<u16>(a | ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3));
                     std::memcpy(vram + at, &v, 2);
                     break;
                 }

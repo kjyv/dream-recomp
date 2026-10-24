@@ -174,6 +174,15 @@ struct Live {
         // every frame.
         if (renderer.textures().set_palette(pvr_.reg_block() + 0x1000 / 4, palette_format()))
             ++palette_changes;
+        // A render to texture draws into the same offscreen image as the frames, and a vertical
+        // blank can come before the next frame replaces it. The window keeps the last frame.
+        const bool to_texture = (pvr_.reg(0x060) & 0x01000000u) != 0;
+        if (to_texture && !holding_frame && offscreen.pixels()) {
+            const std::uint32_t* px = offscreen.pixels();
+            held_frame.assign(
+                px, px + static_cast<std::size_t>(offscreen.width()) * offscreen.height());
+            holding_frame = true;
+        }
         if (!offscreen.render(renderer, frame, geometry)) {
             if (!reported_error) {
                 reported_error = true;
@@ -181,8 +190,15 @@ struct Live {
             }
             return;
         }
+        if (!to_texture)
+            holding_frame = false;
         write_back();
         ++rendered;
+    }
+
+    // What the last render that was not a render to texture drew.
+    const std::uint32_t* frame_pixels() const {
+        return holding_frame ? held_frame.data() : offscreen.pixels();
     }
 
     // True for a buffer the renderer has drawn into at some point. A title alternates between two
@@ -209,6 +225,10 @@ struct Live {
         dream::render::FramebufferInfo target;
         if (!dream::render::describe_write_framebuffer(pvr_.reg_block(), w, h, target))
             return;
+        if (target.texture) {
+            write_texture(target);
+            return;
+        }
         target_address = target.address;
         if (!rendered_into(target.address) && targets_.size() < 8)
             targets_.push_back(target.address);
@@ -229,6 +249,25 @@ struct Live {
         // the fault is not in this step.
         if (!std::getenv("DREAM_NO_WRITEBACK_INVALIDATE"))
             renderer.textures().invalidate_range(target.address, target.address + bytes);
+    }
+
+    // A render to texture always goes back into video memory, whatever --framebuffer-writeback
+    // says: nothing else brings it to the texture that samples it. It covers only the region it
+    // was given, which is the top left of the offscreen image at the render's scale, so that region
+    // is written rather than the whole image scaled down. Rez renders a 256x256 texture between
+    // its frames; without this its stale bytes show as stripes across the screen.
+    void write_texture(const dream::render::FramebufferInfo& target) {
+        const std::uint32_t sx = std::max(1u, offscreen.width() / kGuestWidth);
+        const std::uint32_t sy = std::max(1u, offscreen.height() / kGuestHeight);
+        const std::uint32_t w = std::min(target.width * sx, offscreen.width());
+        const std::uint32_t h = std::min(target.height * sy, offscreen.height());
+        if (!dream::render::encode_framebuffer(target, offscreen.pixels(), w, h, memory_.vram(),
+                                               dream::mem::DcMemory::kVramSize, offscreen.width()))
+            return;
+        ++texture_renders;
+        const std::uint32_t bytes =
+            (target.width + target.modulus) * target.height * bytes_per_written_pixel(target);
+        renderer.textures().invalidate_range(target.address, target.address + bytes);
     }
 
     // Vertical blank: show what the video hardware would be scanning out, and read the keyboard.
@@ -267,7 +306,7 @@ struct Live {
             window.recreate_swapchain();
             return true;
         }
-        const std::uint32_t* source = from_renderer ? offscreen.pixels() : pixels.data();
+        const std::uint32_t* source = from_renderer ? frame_pixels() : pixels.data();
         // Composited into the frame as it is handed to the GPU, so it costs no extra copy of the
         // picture. Deliberately not into the buffers screenshot() and capture() read: F12 and F11
         // are meant to produce the game's own pixels, which is what makes one comparable with
@@ -550,7 +589,7 @@ struct Live {
         if (!f)
             return;
         std::fprintf(f, "P6\n%u %u\n255\n", shown.width, shown.height);
-        const std::uint32_t* src = from_renderer ? offscreen.pixels() : pixels.data();
+        const std::uint32_t* src = from_renderer ? frame_pixels() : pixels.data();
         const std::size_t n = static_cast<std::size_t>(shown.width) * shown.height;
         for (std::size_t i = 0; i < n; ++i) {
             const std::uint32_t p = src[i];
@@ -632,7 +671,9 @@ struct Live {
     std::vector<std::uint32_t> pixels;
     std::string error;
     std::uint64_t rendered = 0, written_back = 0, presented = 0, palette_changes = 0,
-                  decoded_frames = 0, backgrounds = 0;
+                  decoded_frames = 0, backgrounds = 0, texture_renders = 0;
+    std::vector<std::uint32_t> held_frame;  // the last frame, while a render to texture is drawn
+    bool holding_frame = false;
     std::uint32_t target_address = 0;
     std::uint64_t guest_frame = 0;
     std::vector<std::uint32_t> last_stream;
@@ -2113,14 +2154,16 @@ int main(int argc, char** argv) {
     if (live) {
         std::printf(
             "window: %llu frames drawn (%llu with a background plane), %llu presented (%llu "
-            "decoded from video memory), %llu written back; textures %u decoded, %u failed, %u "
-            "overwritten by a render, %llu palette changes\n",
+            "decoded from video memory), %llu written back, %llu rendered to texture; textures %u "
+            "decoded, %u failed, %u overwritten by a render, %llu palette changes\n",
             static_cast<unsigned long long>(live->rendered),
             static_cast<unsigned long long>(live->backgrounds),
             static_cast<unsigned long long>(live->presented),
             static_cast<unsigned long long>(live->decoded_frames),
-            static_cast<unsigned long long>(live->written_back), live->renderer.textures().decoded,
-            live->renderer.textures().failed, live->renderer.textures().overwritten,
+            static_cast<unsigned long long>(live->written_back),
+            static_cast<unsigned long long>(live->texture_renders),
+            live->renderer.textures().decoded, live->renderer.textures().failed,
+            live->renderer.textures().overwritten,
             static_cast<unsigned long long>(live->palette_changes));
         if (live->have_frame)
             std::printf("window: last shown %s\n", live->shown.describe().c_str());

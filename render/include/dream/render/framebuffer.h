@@ -22,9 +22,11 @@ enum class FramebufferFormat : unsigned {
     Rgb565 = 1,    // 16-bit
     Rgb888 = 2,    // 24-bit, three bytes per pixel
     Argb8888 = 3,  // 32-bit
-    // Only the write side produces this one: FB_W_CTRL can ask for ARGB4444, which FB_R_CTRL's
-    // two-bit field cannot name. Values 0 to 3 keep FB_R_CTRL's own encoding, so this sits past it.
-    Argb4444 = 4
+    // Only the write side produces these: FB_W_CTRL can ask for ARGB4444 and ARGB1555, which
+    // FB_R_CTRL's two-bit field cannot name. Values 0 to 3 keep FB_R_CTRL's own encoding, so these
+    // sit past it.
+    Argb4444 = 4,
+    Argb1555 = 5  // the alpha bit is set where the pixel's alpha reaches alpha_threshold
 };
 
 struct FramebufferInfo {
@@ -33,6 +35,11 @@ struct FramebufferInfo {
     std::uint32_t modulus = 0;  // extra pixels between the end of a row and the start of the next
     FramebufferFormat format = FramebufferFormat::Rgb565;
     std::uint32_t concat = 0;  // low bits used to fill out a widened 16-bit channel
+    // Write side only. FB_W_CTRL's threshold for the alpha bit of ARGB1555.
+    std::uint32_t alpha_threshold = 0;
+    // Write side only. Bit 24 of FB_W_SOF1 sends the frame through the 64-bit path, where the
+    // texture unit reads it: a render to texture. The display reads only the 32-bit path.
+    bool texture = false;
     bool enabled = false;
     std::string describe() const;
 };
@@ -70,9 +77,10 @@ RenderTarget describe_render_target(const std::uint32_t* pvr_regs);
 
 // Converts a rendered frame back into the guest's own framebuffer format and writes it into video
 // memory. This is what makes the two drawing paths compose: a title that renders geometry and then
-// writes pixels directly into the same buffer expects to see both.
+// writes pixels directly into the same buffer expects to see both. The source is `src_width` by
+// `src_height` pixels, `src_stride` pixels apart (0: `src_width`), scaled to the target's size.
 bool encode_framebuffer(const FramebufferInfo& info, const std::uint32_t* rgba,
                         std::uint32_t src_width, std::uint32_t src_height, std::uint8_t* vram,
-                        std::size_t vram_size);
+                        std::size_t vram_size, std::uint32_t src_stride = 0);
 
 }  // namespace dream::render
