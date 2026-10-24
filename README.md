@@ -66,6 +66,7 @@ how the repository can carry configs without carrying games.
 | Metropolis Street Racer | yes | yes | boots and runs slowly. Its disc carries five code files and only the loader is configured, so almost everything falls back to the interpreter. |
 | Charge 'N Blast | yes | yes | boots, reads the disc, renders |
 | Ikaruga | yes | yes | boots, renders, saves to the memory card |
+| Rez | yes | yes | boots, saves to the memory card, plays Area 1 with sound (its stage overlays run on the interpreter) |
 
 One title is playable up to a point. If you bring your own game, expect it to translate, build, and
 then stop somewhere. The tooling for finding out where and why is the mature part of this project,

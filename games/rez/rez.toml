@@ -1,0 +1,58 @@
+# Rez, HDR-0178 V1.003 (Japan)
+# Everything here is read off the disc or is the standard Katana layout; nothing from the disc
+# itself is ever committed.
+
+[game]
+id = "rez"
+title = "Rez"
+region = "Japan"
+product = "HDR-0178"
+
+[disc]
+image = "disc/Rez (Japan).gdi"
+
+[binary]
+path = "extracted/fs/1ST_READ.BIN"
+load_address = 0x8C010000    # where the console's BIOS loads the file
+link_address = 0x0C010000    # the same RAM through a different address; what the code assumes
+entry = 0x8C010000           # the first instruction
+
+# Addresses discovery does not reach, and regions the program copies and runs elsewhere, both go
+# here. Run the launcher with --suggest-config FILE and it writes them for you.
+[functions]
+# Katana SDK names, from tools/symbols/match_libs.py.
+symbols = "symbols.tsv"
+extra = [
+    # The eight cases of the computed jump at 0x0C0D5B1A, in an arctangent helper: each puts the
+    # angle into its octant. The jump's offset comes from the 16-bit table at 0x0C0D5B60, read long
+    # before the jump, which switch recovery does not follow. A window run interpreted them about
+    # 20,000 times in five minutes, 2026-10-24.
+    0x0C0D5B22, 0x0C0D5B26, 0x0C0D5B2C, 0x0C0D5B32,
+    0x0C0D5B38, 0x0C0D5B40, 0x0C0D5B46, 0x0C0D5B4E,
+]
+
+# Exception and interrupt vectors. The startup code sets VBR to 0x8C000000 and copies these
+# handlers there. Found by --suggest-config, 2026-10-24.
+[[relocations]]   # VBR+0x000, the handler the interrupt path chains to
+source = 0x0C032FA0
+size = 0x34
+dest = 0x8C000000
+entry = 0x8C000000
+
+[[relocations]]   # VBR+0x100, general exceptions
+source = 0x0C032F0C
+size = 0x34
+dest = 0x8C000100
+entry = 0x8C000100
+
+[[relocations]]   # VBR+0x400, TLB miss, the same code as VBR+0x100
+source = 0x0C032F0C
+size = 0x34
+dest = 0x8C000400
+entry = 0x8C000400
+
+[[relocations]]   # VBR+0x600, interrupts
+source = 0x0C032F44
+size = 0x58
+dest = 0x8C000600
+entry = 0x8C000600
