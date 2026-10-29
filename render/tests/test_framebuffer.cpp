@@ -224,9 +224,10 @@ TEST_CASE("framebuffer: the write side has its own registers and its own format 
     CHECK(info.height == 480);
     CHECK(info.modulus == 0);  // no stride programmed: rows are packed
 
-    r.write_control(3);  // ARGB1555: sixteen bits, the alpha unused once it is on screen
+    r.write_control(3);  // ARGB1555: a render to texture is sampled with its alpha bit
     REQUIRE(describe_write_framebuffer(r.words.data(), 640, 480, info));
-    CHECK(info.format == FramebufferFormat::Rgb555);
+    CHECK(info.format == FramebufferFormat::Argb1555);
+    CHECK_FALSE(info.texture);
 
     r.write_control(2);  // ARGB4444, which FB_R_CTRL's two-bit field cannot name at all
     REQUIRE(describe_write_framebuffer(r.words.data(), 640, 480, info));
@@ -319,4 +320,43 @@ TEST_CASE("framebuffer: a written frame lands where the render target says") {
     REQUIRE(describe_framebuffer(r.words.data(), display));
     REQUIRE(decode_framebuffer(display, vram.data(), vram.size(), pixels));
     CHECK(pixels[0] == 0xFFF8FCF8u);
+}
+
+TEST_CASE("framebuffer: a render to texture writes its region with ARGB1555's alpha bit") {
+    // Bit 24 of FB_W_SOF1 sends the frame through the 64-bit path, where textures are read. Rez
+    // renders a 256x256 ARGB1555 texture this way between its frames.
+    std::vector<std::uint8_t> vram(4096, 0);
+    Regs r;
+    r.at(0x048) = 3u | (0x80u << 8);  // ARGB1555, alpha bit where alpha >= 0x80
+    r.write_address(0x01000040u);
+    r.write_clip(3, 1);  // a 4x2 region
+    r.write_stride(1);   // 8 bytes: four 16-bit pixels, no gap
+    FramebufferInfo info;
+    REQUIRE(describe_write_framebuffer(r.words.data(), 640, 480, info));
+    CHECK(info.texture);
+    CHECK(info.address == 0x40);
+    CHECK(info.format == FramebufferFormat::Argb1555);
+    CHECK(info.alpha_threshold == 0x80);
+    CHECK(info.width == 4);
+    CHECK(info.height == 2);
+
+    // The render covers the top left of a larger image: only that region is written, unscaled.
+    std::vector<u32> image(8 * 4, 0xFF00FF00u);  // green outside the region
+    image[0] = 0xFF0000FFu;                      // red, opaque
+    image[1] = 0x7F0000FFu;                      // red, alpha below the threshold
+    image[8 + 3] = 0x80FF0000u;                  // blue, alpha at the threshold
+    for (u32 y = 0; y < 2; ++y)
+        for (u32 x = 0; x < 4; ++x)
+            if (image[y * 8 + x] == 0xFF00FF00u)
+                image[y * 8 + x] = 0xFFFFFFFFu;  // white elsewhere inside the region
+    REQUIRE(encode_framebuffer(info, image.data(), 4, 2, vram.data(), vram.size(), 8));
+    auto at = [&](u32 x, u32 y) {
+        const std::size_t o = 0x40 + (y * 4 + x) * 2;
+        return static_cast<u32>(vram[o] | vram[o + 1] << 8);
+    };
+    CHECK(at(0, 0) == (0x8000u | 0x1Fu << 10));
+    CHECK(at(1, 0) == (0x1Fu << 10));
+    CHECK(at(3, 1) == (0x8000u | 0x1Fu));
+    CHECK(at(2, 0) == 0xFFFFu);
+    CHECK(vram[0x40 + 16] == 0);  // nothing past the region
 }

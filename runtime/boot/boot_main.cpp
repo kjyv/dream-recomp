@@ -167,11 +167,22 @@ struct Live {
         const dream::render::Frame& frame = decoder.frame();
         // PT_ALPHA_REF: the punch-through threshold the guest chose, which changes per scene.
         geometry.alpha_ref = static_cast<float>(pvr_.reg(0x11C) & 0xFFu) / 255.0f;
+        // The fog registers and table, which the title can change at any time.
+        dream::render::describe_fog(pvr_.reg_block(), geometry.fog);
         // Palette memory is re-read every render but only invalidates the cache when it has
         // actually changed, which is rare; dropping it every frame would decode every texture
         // every frame.
         if (renderer.textures().set_palette(pvr_.reg_block() + 0x1000 / 4, palette_format()))
             ++palette_changes;
+        // A render to texture draws into the same offscreen image as the frames, and a vertical
+        // blank can come before the next frame replaces it. The window keeps the last frame.
+        const bool to_texture = (pvr_.reg(0x060) & 0x01000000u) != 0;
+        if (to_texture && !holding_frame && offscreen.pixels()) {
+            const std::uint32_t* px = offscreen.pixels();
+            held_frame.assign(
+                px, px + static_cast<std::size_t>(offscreen.width()) * offscreen.height());
+            holding_frame = true;
+        }
         if (!offscreen.render(renderer, frame, geometry)) {
             if (!reported_error) {
                 reported_error = true;
@@ -179,8 +190,15 @@ struct Live {
             }
             return;
         }
+        if (!to_texture)
+            holding_frame = false;
         write_back();
         ++rendered;
+    }
+
+    // What the last render that was not a render to texture drew.
+    const std::uint32_t* frame_pixels() const {
+        return holding_frame ? held_frame.data() : offscreen.pixels();
     }
 
     // True for a buffer the renderer has drawn into at some point. A title alternates between two
@@ -207,6 +225,10 @@ struct Live {
         dream::render::FramebufferInfo target;
         if (!dream::render::describe_write_framebuffer(pvr_.reg_block(), w, h, target))
             return;
+        if (target.texture) {
+            write_texture(target);
+            return;
+        }
         target_address = target.address;
         if (!rendered_into(target.address) && targets_.size() < 8)
             targets_.push_back(target.address);
@@ -227,6 +249,25 @@ struct Live {
         // the fault is not in this step.
         if (!std::getenv("DREAM_NO_WRITEBACK_INVALIDATE"))
             renderer.textures().invalidate_range(target.address, target.address + bytes);
+    }
+
+    // A render to texture always goes back into video memory, whatever --framebuffer-writeback
+    // says: nothing else brings it to the texture that samples it. It covers only the region it
+    // was given, which is the top left of the offscreen image at the render's scale, so that region
+    // is written rather than the whole image scaled down. Rez renders a 256x256 texture between
+    // its frames; without this its stale bytes show as stripes across the screen.
+    void write_texture(const dream::render::FramebufferInfo& target) {
+        const std::uint32_t sx = std::max(1u, offscreen.width() / kGuestWidth);
+        const std::uint32_t sy = std::max(1u, offscreen.height() / kGuestHeight);
+        const std::uint32_t w = std::min(target.width * sx, offscreen.width());
+        const std::uint32_t h = std::min(target.height * sy, offscreen.height());
+        if (!dream::render::encode_framebuffer(target, offscreen.pixels(), w, h, memory_.vram(),
+                                               dream::mem::DcMemory::kVramSize, offscreen.width()))
+            return;
+        ++texture_renders;
+        const std::uint32_t bytes =
+            (target.width + target.modulus) * target.height * bytes_per_written_pixel(target);
+        renderer.textures().invalidate_range(target.address, target.address + bytes);
     }
 
     // Vertical blank: show what the video hardware would be scanning out, and read the keyboard.
@@ -265,7 +306,7 @@ struct Live {
             window.recreate_swapchain();
             return true;
         }
-        const std::uint32_t* source = from_renderer ? offscreen.pixels() : pixels.data();
+        const std::uint32_t* source = from_renderer ? frame_pixels() : pixels.data();
         // Composited into the frame as it is handed to the GPU, so it costs no extra copy of the
         // picture. Deliberately not into the buffers screenshot() and capture() read: F12 and F11
         // are meant to produce the game's own pixels, which is what makes one comparable with
@@ -548,7 +589,7 @@ struct Live {
         if (!f)
             return;
         std::fprintf(f, "P6\n%u %u\n255\n", shown.width, shown.height);
-        const std::uint32_t* src = from_renderer ? offscreen.pixels() : pixels.data();
+        const std::uint32_t* src = from_renderer ? frame_pixels() : pixels.data();
         const std::size_t n = static_cast<std::size_t>(shown.width) * shown.height;
         for (std::size_t i = 0; i < n; ++i) {
             const std::uint32_t p = src[i];
@@ -630,7 +671,9 @@ struct Live {
     std::vector<std::uint32_t> pixels;
     std::string error;
     std::uint64_t rendered = 0, written_back = 0, presented = 0, palette_changes = 0,
-                  decoded_frames = 0, backgrounds = 0;
+                  decoded_frames = 0, backgrounds = 0, texture_renders = 0;
+    std::vector<std::uint32_t> held_frame;  // the last frame, while a render to texture is drawn
+    bool holding_frame = false;
     std::uint32_t target_address = 0;
     std::uint64_t guest_frame = 0;
     std::vector<std::uint32_t> last_stream;
@@ -789,6 +832,16 @@ std::string report_text(dream::System& sys, dream::hle::Bios& bios, const dream:
                   static_cast<unsigned long long>(sb.sort_dma_starts),
                   static_cast<unsigned long long>(dmac.manual_transfers));
     s += buf;
+    if (sys.memory.sq_tlb_flushes || sys.memory.sq_tlb_misses ||
+        sys.memory.utlb().associative_writes) {
+        std::snprintf(buf, sizeof buf,
+                      "store queues through the UTLB: %llu bursts, %llu misses (QACR used), "
+                      "%llu associative UTLB writes ignored\n",
+                      static_cast<unsigned long long>(sys.memory.sq_tlb_flushes),
+                      static_cast<unsigned long long>(sys.memory.sq_tlb_misses),
+                      static_cast<unsigned long long>(sys.memory.utlb().associative_writes));
+        s += buf;
+    }
     if (sb.ch2_errors) {
         for (const auto* r : {&sb.first_refused, &sb.last_refused}) {
             std::snprintf(buf, sizeof buf,
@@ -1063,6 +1116,8 @@ void usage(const char* argv0, std::FILE* out) {
         "  --bindings FILE        controller bindings; the default is one file per user, shared\n"
         "                         by every title. F1 (or a pad's select button) opens the screen\n"
         "                         that edits them, and writes them back here.\n"
+        "  --bios FILE            a 2 MB boot ROM image. Titles draw system text with its font;\n"
+        "                         without it that text is blank. The BIOS calls stay native\n"
         "  --vmu FILE             a 128 KB memory-card image; writes are saved back to it.\n"
         "  --flash FILE           a 128 KB console flash image; without it one is synthesised\n"
         "                         Created, blank and formatted, if the path does not exist. A "
@@ -1087,6 +1142,9 @@ void usage(const char* argv0, std::FILE* out) {
         "  --rtc-seed N           fix the console clock so two runs do the same thing\n"
         "  --press B@F[,B@F...]   hold a button for 8 frames from frame F (a b c x y z start\n"
         "                         up down left right), to get past screens that wait for input\n"
+        "  --record-input FILE    write the controller state of every frame where it changes\n"
+        "  --replay-input FILE    play a recording back instead of reading the controls. With the\n"
+        "                         same --rtc-seed, boot ROM and memory-card image the run repeats\n"
         "\n"
         "Reporting what happened:\n"
         "  --report FILE          write the end-of-run report to a file as well as stdout\n"
@@ -1150,6 +1208,9 @@ int main(int argc, char** argv) {
     bool bindings_file_set = false;
     std::string flash_dump;           // --dump-flash FILE: write the flash out at the stop, so a
                                       // synthesised one can be compared against a reference.
+    std::string bios_image;           // --bios FILE: the owner's 2 MB boot ROM. Only its data is
+                                      // used: the font call returns an address in it. The BIOS
+                                      // calls stay native. Never committed: owner data.
     std::string flash_image;          // --flash FILE: a 128 KB console flash image. The runtime
                                       // synthesises one when this is absent, which is enough for
                                       // some titles and not others: a title that reads the user's
@@ -1169,6 +1230,10 @@ int main(int argc, char** argv) {
     // frame, so a headless run can get past "press start" screens. Names: a b c x y z start up
     // down left right.
     std::string presses;
+    // --record-input FILE / --replay-input FILE: the controller state the Maple poll sees, one line
+    // per frame where it changes. The run is deterministic, so a replay repeats a played session,
+    // at any speed, with or without a window.
+    std::string record_input, replay_input;
     // --window: open a window and play. Without it the run is headless exactly as before.
     // --scale N draws the geometry at N times the guest's resolution; the frame is resampled back
     // into the guest's framebuffer, so the guest never learns its screen changed size.
@@ -1250,6 +1315,8 @@ int main(int argc, char** argv) {
         } else if (!std::strcmp(argv[i], "--bindings") && i + 1 < argc) {
             bindings_file = argv[++i];
             bindings_file_set = true;
+        } else if (!std::strcmp(argv[i], "--bios") && i + 1 < argc) {
+            bios_image = argv[++i];
         } else if (!std::strcmp(argv[i], "--flash") && i + 1 < argc) {
             flash_image = argv[++i];
         } else if (!std::strcmp(argv[i], "--dump-flash") && i + 1 < argc) {
@@ -1260,6 +1327,10 @@ int main(int argc, char** argv) {
             dump_ta_frame = std::strtoull(argv[++i], nullptr, 0);
         else if (!std::strcmp(argv[i], "--dump-ta-at-frame") && i + 1 < argc)
             dump_ta_at_frame = std::strtoull(argv[++i], nullptr, 0);
+        else if (!std::strcmp(argv[i], "--record-input") && i + 1 < argc)
+            record_input = argv[++i];
+        else if (!std::strcmp(argv[i], "--replay-input") && i + 1 < argc)
+            replay_input = argv[++i];
         else if (!std::strcmp(argv[i], "--press") && i + 1 < argc)
             presses = argv[++i];
         else if (!std::strcmp(argv[i], "--max-seconds") && i + 1 < argc)
@@ -1357,6 +1428,19 @@ int main(int argc, char** argv) {
     dream::System sys;
     dream::hle::Bios bios(sys);
     bios.attach_disc(disc.get());
+    if (!bios_image.empty()) {
+        std::ifstream f(bios_image, std::ios::binary);
+        std::vector<char> raw((std::istreambuf_iterator<char>(f)),
+                              std::istreambuf_iterator<char>());
+        if (raw.size() != dream::mem::DcMemory::kBiosSize) {
+            std::fprintf(stderr, "--bios %s: expected %u bytes, got %zu\n", bios_image.c_str(),
+                         dream::mem::DcMemory::kBiosSize, raw.size());
+            return 2;
+        }
+        std::memcpy(sys.memory.bios(), raw.data(), raw.size());
+        std::printf("bios: loaded %s (its data only; the BIOS calls stay native)\n",
+                    bios_image.c_str());
+    }
     // Load the flash before setup_boot: Bios::install() formats a synthetic one only when the
     // factory string is not already present, so an image loaded here is used as it stands.
     if (!flash_image.empty()) {
@@ -1491,7 +1575,7 @@ int main(int argc, char** argv) {
         cpg(0xFFC00000u, 0x10 / 4), rtc(0xFFC80000u, 0x40 / 4);
     dream::mem::NullRegion cache_arrays;
     SerialCapture scif;
-    sys.memory.map_p4(0xF0000000u, 0xF8000000u, &cache_arrays);
+    sys.memory.map_p4(0xF0000000u, 0xF6000000u, &cache_arrays);  // the UTLB arrays are DcMemory's
     sys.memory.map_p4(0xFF800000u, 0xFF800050u, &bsc);
     sys.memory.map_p4(0xFF200000u, 0xFF200024u, &ubc);
     sys.memory.map_p4(0xFFC00000u, 0xFFC00010u, &cpg);
@@ -1573,14 +1657,72 @@ int main(int argc, char** argv) {
                     scripted.push_back({frame, n.bit});
         }
     }
+    // Recorded controller states: frame, buttons, triggers, sticks. Recorded and replayed right
+    // before the Maple poll, so the file holds what the title read, whatever produced it.
+    using Pad = dream::maple::ControllerState;
+    std::vector<std::pair<std::uint64_t, Pad>> replayed;
+    std::size_t replay_next = 0;
+    if (!replay_input.empty()) {
+        std::ifstream rec(replay_input);
+        if (!rec) {
+            std::fprintf(stderr, "--replay-input %s: cannot read it\n", replay_input.c_str());
+            return 2;
+        }
+        std::string line;
+        while (std::getline(rec, line)) {
+            unsigned long long f = 0;
+            unsigned b = 0, rt = 0, lt = 0, x = 0, y = 0, x2 = 0, y2 = 0;
+            if (line.empty() || line[0] == '#' ||
+                std::sscanf(line.c_str(), "%llu %x %u %u %u %u %u %u", &f, &b, &rt, &lt, &x, &y,
+                            &x2, &y2) != 8)
+                continue;
+            Pad p;
+            p.buttons = static_cast<std::uint16_t>(b);
+            p.rtrigger = static_cast<std::uint8_t>(rt);
+            p.ltrigger = static_cast<std::uint8_t>(lt);
+            p.joy_x = static_cast<std::uint8_t>(x);
+            p.joy_y = static_cast<std::uint8_t>(y);
+            p.joy2_x = static_cast<std::uint8_t>(x2);
+            p.joy2_y = static_cast<std::uint8_t>(y2);
+            replayed.push_back({f, p});
+        }
+        std::printf("input: replaying %zu controller changes from %s\n", replayed.size(),
+                    replay_input.c_str());
+    }
+    std::FILE* record_file = nullptr;
+    std::uint64_t recorded = 0;
+    Pad last_recorded;
+    if (!record_input.empty()) {
+        record_file = std::fopen(record_input.c_str(), "w");
+        if (!record_file) {
+            std::fprintf(stderr, "--record-input %s: cannot write it\n", record_input.c_str());
+            return 2;
+        }
+        std::fprintf(record_file, "# frame buttons rtrigger ltrigger joy_x joy_y joy2_x joy2_y\n");
+    }
     sys.spg.on_vblank_out = [&] {
+        const std::uint64_t f = sys.spg.frames();
+        while (replay_next < replayed.size() && replayed[replay_next].first <= f)
+            pad_ptr->state = replayed[replay_next++].second;
         if (!scripted.empty()) {
-            const std::uint64_t f = sys.spg.frames();
             std::uint16_t held = 0;
             for (const auto& [start, bit] : scripted)
                 if (f >= start && f < start + 8)
                     held |= bit;
             pad_ptr->state.buttons = static_cast<std::uint16_t>(0xFFFFu & ~held);
+        }
+        if (record_file) {
+            const Pad& p = pad_ptr->state;
+            if (recorded == 0 || p.buttons != last_recorded.buttons ||
+                p.rtrigger != last_recorded.rtrigger || p.ltrigger != last_recorded.ltrigger ||
+                p.joy_x != last_recorded.joy_x || p.joy_y != last_recorded.joy_y ||
+                p.joy2_x != last_recorded.joy2_x || p.joy2_y != last_recorded.joy2_y) {
+                std::fprintf(record_file, "%llu %04x %u %u %u %u %u %u\n",
+                             static_cast<unsigned long long>(f), p.buttons, p.rtrigger, p.ltrigger,
+                             p.joy_x, p.joy_y, p.joy2_x, p.joy2_y);
+                last_recorded = p;
+                ++recorded;
+            }
         }
         maple.vblank();
     };
@@ -1645,7 +1787,7 @@ int main(int argc, char** argv) {
                 paused_for += std::chrono::steady_clock::now() - paused_at;
             }
             // Scripted presses win while they are held, so --press still works with a window open.
-            if (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu)
+            if (replayed.empty() && (scripted.empty() || pad_ptr->state.buttons == 0xFFFFu))
                 live->read_controls(pad_ptr->state);
             if (unthrottled)
                 return;
@@ -1998,6 +2140,12 @@ int main(int argc, char** argv) {
         std::printf("wrote %s: %llu writes hashed\n", write_hash.c_str(),
                     static_cast<unsigned long long>(sys.memory.writes_hashed));
     }
+    if (record_file) {
+        std::fclose(record_file);
+        std::printf("input: recorded %llu controller changes over %llu frames to %s\n",
+                    static_cast<unsigned long long>(recorded),
+                    static_cast<unsigned long long>(sys.spg.frames()), record_input.c_str());
+    }
     if (log_file) {
         std::fclose(log_file);
         std::printf("wrote %s\n", write_log.c_str());
@@ -2006,14 +2154,16 @@ int main(int argc, char** argv) {
     if (live) {
         std::printf(
             "window: %llu frames drawn (%llu with a background plane), %llu presented (%llu "
-            "decoded from video memory), %llu written back; textures %u decoded, %u failed, %u "
-            "overwritten by a render, %llu palette changes\n",
+            "decoded from video memory), %llu written back, %llu rendered to texture; textures %u "
+            "decoded, %u failed, %u overwritten by a render, %llu palette changes\n",
             static_cast<unsigned long long>(live->rendered),
             static_cast<unsigned long long>(live->backgrounds),
             static_cast<unsigned long long>(live->presented),
             static_cast<unsigned long long>(live->decoded_frames),
-            static_cast<unsigned long long>(live->written_back), live->renderer.textures().decoded,
-            live->renderer.textures().failed, live->renderer.textures().overwritten,
+            static_cast<unsigned long long>(live->written_back),
+            static_cast<unsigned long long>(live->texture_renders),
+            live->renderer.textures().decoded, live->renderer.textures().failed,
+            live->renderer.textures().overwritten,
             static_cast<unsigned long long>(live->palette_changes));
         if (live->have_frame)
             std::printf("window: last shown %s\n", live->shown.describe().c_str());

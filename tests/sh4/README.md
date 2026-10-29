@@ -14,7 +14,7 @@
 Rebuild the program binaries after editing a `.s`:
 
 ```
-tools/docker/run.sh 'cd tests/sh4/programs && for s in p1_sum p2_alu p3_mem p4_calls p5_fpu p6_switch p7_fpuedge p8_split p9_rte p11_condfall; do
+tools/docker/run.sh 'cd tests/sh4/programs && for s in p1_sum p2_alu p3_mem p4_calls p5_fpu p6_switch p7_fpuedge p8_split p9_rte p11_condfall p13_slotcase; do
   /opt/toolchains/dc/sh-elf/bin/sh-elf-as -little $s.s -o /tmp/$s.o &&
   /opt/toolchains/dc/sh-elf/bin/sh-elf-ld -EL -Ttext=0x8c010000 -e 0x8c010000 /tmp/$s.o -o /tmp/$s.elf &&
   /opt/toolchains/dc/sh-elf/bin/sh-elf-objcopy -O binary -j .text /tmp/$s.elf $s.bin &&

@@ -89,7 +89,41 @@ struct PushConstants {
     float offset[2];
     std::int32_t mode;
     float alpha_ref;
+    float padding[2];  // the shaders' vec4 starts on a 16-byte boundary
+    float clip[4];     // the user clip rectangle in guest pixels: x0, y0, x1, y1
+    std::int32_t clip_mode;
 };
+
+// The fog uniform block, std140. Each table entry is the factor where its stretch of depth starts
+// and where it ends; the end equals the next entry's start, and the shader interpolates between
+// the two. Two entries share a vec4.
+struct FogUniform {
+    float table_colour[4];
+    float vertex_colour[4];
+    float clamp_min[4];
+    float clamp_max[4];
+    float params[4];  // x: density
+    float table[64][4];
+};
+
+void unpack_rgba(std::uint32_t rgba, float* out) {
+    for (int i = 0; i < 4; ++i) out[i] = static_cast<float>((rgba >> (8 * i)) & 0xFFu) / 255.0f;
+}
+
+FogUniform fog_uniform(const FogSettings& fog) {
+    FogUniform u{};
+    unpack_rgba(fog.table_colour, u.table_colour);
+    unpack_rgba(fog.vertex_colour, u.vertex_colour);
+    // FOG_CLAMP_MIN and MAX are ARGB, the order of the vertex colours.
+    unpack_colour(fog.clamp_min, u.clamp_min);
+    unpack_colour(fog.clamp_max, u.clamp_max);
+    u.params[0] = fog.density;
+    for (std::size_t i = 0; i < 128; ++i) {
+        u.table[i / 2][(i & 1) * 2] = static_cast<float>(fog.factor[i]) / 255.0f;
+        u.table[i / 2][(i & 1) * 2 + 1] = static_cast<float>(fog.delta[i]) / 255.0f;
+    }
+    return u;
+}
 
 // What identifies a texture within one frame: the control word, plus the TSP bits that carry the
 // size. Everything the sampler reads is decided per texture in prepare(), so it does not belong
@@ -184,13 +218,61 @@ bool Renderer::create(Context& ctx, VkRenderPass render_pass) {
         return false;
     }
 
+    // Set 1: the fog uniform block, bound once per frame.
+    VkDescriptorSetLayoutBinding fog_binding{};
+    fog_binding.binding = 0;
+    fog_binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    fog_binding.descriptorCount = 1;
+    fog_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo fog_dslci{};
+    fog_dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    fog_dslci.bindingCount = 1;
+    fog_dslci.pBindings = &fog_binding;
+    if (vkCreateDescriptorSetLayout(ctx.device(), &fog_dslci, nullptr, &fog_layout_) !=
+        VK_SUCCESS) {
+        error_ = "vkCreateDescriptorSetLayout (fog) failed";
+        return false;
+    }
+    VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1};
+    VkDescriptorPoolCreateInfo dpci{};
+    dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpci.maxSets = 1;
+    dpci.poolSizeCount = 1;
+    dpci.pPoolSizes = &pool_size;
+    if (vkCreateDescriptorPool(ctx.device(), &dpci, nullptr, &fog_pool_) != VK_SUCCESS) {
+        error_ = "vkCreateDescriptorPool (fog) failed";
+        return false;
+    }
+    VkDescriptorSetAllocateInfo dsai{};
+    dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    dsai.descriptorPool = fog_pool_;
+    dsai.descriptorSetCount = 1;
+    dsai.pSetLayouts = &fog_layout_;
+    // Sized once here: the descriptor points at this buffer, so it must never be reallocated.
+    if (vkAllocateDescriptorSets(ctx.device(), &dsai, &fog_set_) != VK_SUCCESS ||
+        !fog_buffer_.ensure(ctx, sizeof(FogUniform), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) {
+        error_ = "cannot set up the fog uniform buffer";
+        return false;
+    }
+    const FogUniform none = fog_uniform(FogSettings{});
+    fog_buffer_.write(&none, sizeof none);
+    VkDescriptorBufferInfo dbi{fog_buffer_.handle(), 0, sizeof(FogUniform)};
+    VkWriteDescriptorSet wds{};
+    wds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wds.dstSet = fog_set_;
+    wds.descriptorCount = 1;
+    wds.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    wds.pBufferInfo = &dbi;
+    vkUpdateDescriptorSets(ctx.device(), 1, &wds, 0, nullptr);
+
     VkPushConstantRange range{};
     range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     range.size = sizeof(PushConstants);
+    const VkDescriptorSetLayout set_layouts[] = {set_layout_, fog_layout_};
     VkPipelineLayoutCreateInfo plci{};
     plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    plci.setLayoutCount = 1;
-    plci.pSetLayouts = &set_layout_;
+    plci.setLayoutCount = 2;
+    plci.pSetLayouts = set_layouts;
     plci.pushConstantRangeCount = 1;
     plci.pPushConstantRanges = &range;
     if (vkCreatePipelineLayout(ctx.device(), &plci, nullptr, &layout_) != VK_SUCCESS) {
@@ -380,6 +462,10 @@ void Renderer::draw(VkCommandBuffer cmd, const Frame& frame, const FrameGeometry
     const VkDeviceSize zero = 0;
     VkBuffer buffer = vertices_.handle();
     vkCmdBindVertexBuffers(cmd, 0, 1, &buffer, &zero);
+    const FogUniform fog = fog_uniform(geometry.fog);
+    fog_buffer_.write(&fog, sizeof fog);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 1, 1, &fog_set_, 0,
+                            nullptr);
 
     // Opaque geometry only in this step. Punch-through and translucent lists need the alpha test
     // and the sorted pass, which are steps 4 and 5.
@@ -463,9 +549,17 @@ void Renderer::draw(VkCommandBuffer cmd, const Frame& frame, const FrameGeometry
         }
         if (tsp_use_alpha(p.tsp))
             push.mode |= 64;
+        push.mode |= static_cast<std::int32_t>(tsp_fog_control(p.tsp) << 7);
+        if (tsp_colour_clamp(p.tsp))
+            push.mode |= 512;
         if (item.blended)
             ++blended_polygons;
         push.alpha_ref = geometry.alpha_ref;
+        push.clip_mode = static_cast<std::int32_t>(p.tile_clip);
+        push.clip[0] = p.clip_x0;
+        push.clip[1] = p.clip_y0;
+        push.clip[2] = p.clip_x1;
+        push.clip[3] = p.clip_y1;
         vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof push, &push);
         vkCmdDraw(cmd, p.count, 1, p.first, 0);
@@ -486,6 +580,16 @@ void Renderer::destroy() {
         set_layout_ = VK_NULL_HANDLE;
     }
     vertices_.destroy();
+    fog_buffer_.destroy();
+    if (fog_pool_) {
+        vkDestroyDescriptorPool(ctx_->device(), fog_pool_, nullptr);  // frees fog_set_
+        fog_pool_ = VK_NULL_HANDLE;
+        fog_set_ = VK_NULL_HANDLE;
+    }
+    if (fog_layout_) {
+        vkDestroyDescriptorSetLayout(ctx_->device(), fog_layout_, nullptr);
+        fog_layout_ = VK_NULL_HANDLE;
+    }
     if (layout_) {
         vkDestroyPipelineLayout(ctx_->device(), layout_, nullptr);
         layout_ = VK_NULL_HANDLE;

@@ -9,7 +9,7 @@ Flycast's reios and the KallistiOS headers (GPL-2.0 derivation per ADR 1).
 | Vector | Selector | Implemented |
 |---|---|---|
 | 0x8C0000B0 SYSINFO | r7 | INIT (writes the 24-byte id block at 0x8C000068 from flash), ICON, ID |
-| 0x8C0000B4 ROMFONT | r1 | ADDRESS (an empty area in the boot ROM space), LOCK, UNLOCK |
+| 0x8C0000B4 ROMFONT | r1 | ADDRESS (0xA0100020 in the boot ROM space: blank, or the real font when the launcher has `--bios FILE`), LOCK, UNLOCK |
 | 0x8C0000B8 FLASHROM | r7 | INFO (partition table), READ, WRITE (bits clear only), DELETE (erase partition) |
 | 0x8C0000BC / C0 GD-ROM | r6 = 0, r7 | REQ_CMD, GET_CMD_STAT, EXEC_SERVER, INIT_SYSTEM, GET_DRV_STAT, G1_DMA_END, READ_ABORT, RESET, CHANGE_DATA_TYPE, SET_PIO_CALLBACK; the streaming transfer functions return GDC_ERR and are counted |
 | 0x8C0000BC misc | r6 = -1, r7 | MISC_INIT, MISC_SETVECTOR (accepted, no effect) |

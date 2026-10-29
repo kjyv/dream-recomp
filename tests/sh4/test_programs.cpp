@@ -217,3 +217,18 @@ TEST_CASE("p7_fpuedge: FPU edge cases match the interpreter's captured state") {
     }
     CHECK(c.fpscr == 0x00040001u);
 }
+
+TEST_CASE("p13_slotcase: a switch case in the slot of a bt/s runs the slot once") {
+    dream::BareMemory m;
+    load_image(m, "p13_slotcase.bin", 0x8C010000);
+    struct Case {
+        std::uint32_t index, flag, result;
+    };
+    for (const Case k : {Case{0, 0, 1}, Case{0, 1, 11}, Case{1, 0, 11}, Case{2, 0, 0xFFFFFFFFu}}) {
+        Ctx c = fresh();
+        c.r[4] = k.index;
+        c.r[5] = k.flag;
+        dream::gen::slotcase(c, m);
+        CHECK_MESSAGE(c.r[0] == k.result, "case " << k.index << " flag " << k.flag);
+    }
+}

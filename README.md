@@ -65,6 +65,8 @@ how the repository can carry configs without carrying games.
 | Tech Romancer | yes | yes | boots, draws its options screen |
 | Metropolis Street Racer | yes | yes | boots and runs slowly. Its disc carries five code files and only the loader is configured, so almost everything falls back to the interpreter. |
 | Charge 'N Blast | yes | yes | boots, reads the disc, renders |
+| Ikaruga | yes | yes | boots, renders, saves to the memory card |
+| Rez | yes | yes | boots, saves to the memory card, plays Area 1 with sound (its stage overlays run on the interpreter) |
 
 One title is playable up to a point. If you bring your own game, expect it to translate, build, and
 then stop somewhere. The tooling for finding out where and why is the mature part of this project,
@@ -73,7 +75,9 @@ and it is covered under [When it stops](#when-it-stops).
 ## Requirements
 
 - CMake 3.24+, a C++20 compiler (Apple clang, clang 16+, or MSVC 2022), Python 3.9+, git
-- A disc image you dumped yourself, `.chd` or `.gdi`
+- A disc image you dumped yourself, `.chd` or `.gdi`. A self-boot CD-R image (`.cdi`) also runs.
+  The launcher presents it as the GD-ROM that the game was made for. Its boot file usually has
+  patches, so prefer a GD-ROM dump.
 - For a window and sound: Vulkan (MoltenVK on macOS), SDL3, and `glslc`. These are optional;
   without them everything still builds and runs headless.
 

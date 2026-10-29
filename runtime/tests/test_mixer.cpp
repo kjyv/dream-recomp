@@ -78,6 +78,18 @@ TEST_CASE("mixer: a keyed-on looping PCM channel sounds, then releases to silenc
     CHECK(r.aica.last_right == 0);
 }
 
+TEST_CASE("mixer: a 32-bit store to the first register keys the channel on and off") {
+    // The ARM7DI has no halfword store, so a sound driver writes KYONEX with STR.
+    Rig r;
+    r.square_wave(0x1000, 64, 8000);
+    r.program_channel(0x1000, 64);
+    r.w(0x00, r.ctrl | (1u << 14) | (1u << 15), 4);
+    CHECK(r.aica.mixer.key_ons == 1);
+    CHECK(r.aica.mixer.active_channels() == 1);
+    r.w(0x00, r.ctrl | (1u << 15), 4);
+    CHECK(r.aica.mixer.key_offs == 1);
+}
+
 TEST_CASE("mixer: pan moves the signal between the channels") {
     Rig r;
     r.square_wave(0x1000, 64, 8000);

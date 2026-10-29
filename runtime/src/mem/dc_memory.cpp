@@ -56,6 +56,58 @@ void FaultLog::clear() {
     total_ = dropped_ = 0;
 }
 
+// ---- Utlb --------------------------------------------------------------------------------------
+
+std::uint32_t Utlb::read(std::uint32_t addr, unsigned) {
+    const unsigned i = (addr >> 8) & 63;
+    if (addr < 0xF7000000u)
+        return addr_[i];
+    return (addr & 0x00800000u) ? data2_[i] : data1_[i];
+}
+
+void Utlb::write(std::uint32_t addr, std::uint32_t value, unsigned size) {
+    if (size != 4)
+        return;
+    const unsigned i = (addr >> 8) & 63;
+    if (addr < 0xF7000000u) {
+        if (addr & 0x80u) {
+            ++associative_writes;
+            return;
+        }
+        addr_[i] = value;  // VPN, D, V, ASID
+        data1_[i] = (data1_[i] & ~kValid) | (value & kValid);
+        return;
+    }
+    if (addr & 0x00800000u) {
+        data2_[i] = value & 0xFu;  // TC, SA
+        return;
+    }
+    data1_[i] = value & 0x1FFFFDFFu;  // PPN, V, SZ1, PR, SZ0, C, D, SH, WT
+    addr_[i] = (addr_[i] & ~kValid) | (value & kValid);
+}
+
+bool Utlb::translate(std::uint32_t va, std::uint32_t& pa) const noexcept {
+    static constexpr std::uint32_t kPageMask[4] = {0xFFFFFC00u, 0xFFFFF000u, 0xFFFF0000u,
+                                                   0xFFF00000u};  // 1 KB, 4 KB, 64 KB, 1 MB
+    for (unsigned i = 0; i < 64; ++i) {
+        if (!(data1_[i] & kValid))
+            continue;
+        const std::uint32_t mask = kPageMask[((data1_[i] >> 6) & 2u) | ((data1_[i] >> 4) & 1u)];
+        if (((va ^ addr_[i]) & mask) == 0) {
+            pa = (data1_[i] & 0x1FFFFC00u & mask) | (va & ~mask);
+            return true;
+        }
+    }
+    return false;
+}
+
+void Utlb::invalidate() noexcept {
+    for (unsigned i = 0; i < 64; ++i) {
+        addr_[i] &= ~kValid;
+        data1_[i] &= ~kValid;
+    }
+}
+
 // ---- DcMemory ----------------------------------------------------------------------------------
 
 DcMemory::DcMemory()
@@ -96,14 +148,15 @@ std::uint32_t DcMemory::vram_map32(std::uint32_t offset32) noexcept {
 
 DcMemory::Target DcMemory::resolve(std::uint32_t a, unsigned size, bool write) {
     Target t;
-    // P4: store queues, then the on-chip module registers.
+    // P4: store queues, the UTLB arrays, then the on-chip module registers.
     if ((a & 0xE0000000u) == 0xE0000000u) {
         if (a < 0xE4000000u) {
             t.kind = Target::kBytes;
             t.bytes = reinterpret_cast<std::uint8_t*>(&sq_[(a >> 5) & 1][0]) + (a & 0x1Cu);
             return t;
         }
-        if (MmioHandler* h = find(p4_mmio_, a)) {
+        MmioHandler* h = (a >= 0xF6000000u && a < 0xF8000000u) ? &utlb_ : find(p4_mmio_, a);
+        if (h) {
             t.kind = Target::kMmio;
             if (on_device_access)
                 on_device_access();
@@ -289,6 +342,11 @@ void DcMemory::write32(std::uint32_t a, std::uint32_t v) {
             case 0x28:
                 intevt = v & 0xFFFu;
                 return;
+            case 0x10:  // MMUCR: TI invalidates every TLB entry and reads back as 0
+                ccn_[4] = v & ~4u;
+                if (v & 4u)
+                    utlb_.invalidate();
+                return;
             case 0x38:
                 set_qacr(0, v);
                 return;
@@ -297,7 +355,7 @@ void DcMemory::write32(std::uint32_t a, std::uint32_t v) {
                 return;
             default:
                 ccn_[(a >> 2) & 15] = v;
-                return;  // MMUCR, CCR, PTEH/PTEL/TTB/TEA/PTEA: stored, no effect
+                return;  // CCR, PTEH/PTEL/TTB/TEA/PTEA: stored, no effect
         }
     }
     store<std::uint32_t>(a, v);
@@ -333,9 +391,21 @@ void DcMemory::sq_write32(std::uint32_t a, std::uint32_t v) {
 
 // PREF @Rn with Rn in the store-queue area: the 32 bytes of SQ0 or SQ1 (address bit 5) land at
 // physical (QACRn.AREA << 26) | (Rn & 0x03FFFFE0); SH7750 manual 4.6 and Flycast storeq.cpp.
+// With MMUCR.AT set the UTLB maps Rn instead and QACR is not used. A miss raises a TLB miss on
+// hardware; here the burst takes the QACR route and is counted, so a title that depends on the
+// exception shows in the report instead of faulting.
 void DcMemory::sq_flush(std::uint32_t a) {
     const unsigned n = (a >> 5) & 1;
-    const std::uint32_t dest = (qacr_[n] << 24) | (a & 0x03FFFFE0u);
+    std::uint32_t dest = (qacr_[n] << 24) | (a & 0x03FFFFE0u);
+    if (ccn_[4] & 1u) {
+        std::uint32_t pa = 0;
+        if (utlb_.translate(a & 0xFFFFFFE0u, pa)) {
+            dest = pa;
+            ++sq_tlb_flushes;
+        } else {
+            ++sq_tlb_misses;
+        }
+    }
     const std::uint32_t* words = sq_[n];
     const Target t = resolve(dest, 4, true);
     if (t.kind == Target::kBytes) {

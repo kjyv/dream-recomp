@@ -21,6 +21,11 @@ const Track* Disc::track_for(std::uint32_t lba) const noexcept {
 }
 
 const Track* Disc::hd_track() const noexcept {
+    // A GD-ROM's game area is track 3 on, wherever it starts (a CDI's can start below 45000).
+    if (type_ == DiscType::GdRom)
+        for (std::size_t i = 2; i < tracks_.size(); ++i)
+            if (tracks_[i].data)
+                return &tracks_[i];
     for (const auto& t : tracks_)
         if (t.data && t.lba >= kHdAreaLba)
             return &t;
@@ -54,8 +59,8 @@ bool Disc::read_user(std::uint32_t lba, std::uint8_t* out) {
             std::memcpy(out, raw, kUserBytes);
             return true;
         case 2352:
-            std::memcpy(out, raw + 16, kUserBytes);
-            return true;  // mode 1: sync 12, header 4
+            std::memcpy(out, raw + (t->mode2 ? 24 : 16), kUserBytes);
+            return true;  // sync 12, header 4, and a mode 2 subheader of 8
         case 2336:
             std::memcpy(out, raw + 8, kUserBytes);
             return true;  // mode 2 form 1 without sync
@@ -338,6 +343,201 @@ private:
     std::vector<ChdTrack> layout_;
 };
 
+// ---- CDI ---------------------------------------------------------------------------------------
+
+// DiscJuggler's format, as cdirip reads it. The tracks' sectors are stored back to back, each track
+// behind its pregap. A descriptor table follows them, and the file's last 8 bytes give the format
+// version and the table's position: from the end of the file in version 3.5, from the start
+// before it. Track LBAs in the table are absolute, so a later session keeps its real address.
+class CdiDisc final : public Disc {
+public:
+    bool open(const std::filesystem::path& path, std::string& error) {
+        path_ = path.string();
+        f_ = std::fopen(path_.c_str(), "rb");
+        if (!f_) {
+            error = "cannot open " + path_;
+            return false;
+        }
+        if (!parse(error))
+            return false;
+        present_as_gdrom();
+        return true;
+    }
+
+    // A CDI is a CD-R, but a Katana game on one was mastered for a GD-ROM, and its file system
+    // library may refuse any other disc type (Rez does). The disc is presented as that GD-ROM: the
+    // last session's tracks become the high-density area, tracks 3 on, at the LBAs the session's
+    // file system was written for, and the tracks before it the single-density area, tracks 1 and
+    // 2. A CD-R has no place for a third track there, so any further one is left out.
+    void present_as_gdrom() {
+        std::vector<Track> low, high;
+        for (std::size_t i = 0; i < tracks_.size(); ++i)
+            (sessions_[i] == sessions_.back() ? high : low).push_back(tracks_[i]);
+        if (low.size() > 2)
+            low.resize(2);
+        while (low.size() < 2) {  // a placeholder without sectors
+            Track t;
+            t.lba = low.empty() ? 0 : low.back().end_lba();
+            t.data = !low.empty();
+            low.push_back(t);
+        }
+        tracks_ = low;
+        tracks_.insert(tracks_.end(), high.begin(), high.end());
+        for (std::size_t i = 0; i < tracks_.size(); ++i)
+            tracks_[i].number = static_cast<unsigned>(i + 1);
+        type_ = DiscType::GdRom;
+    }
+
+    bool read_raw(std::uint32_t lba, std::uint8_t* out) override {
+        const Track* t = track_for(lba);
+        if (!t)
+            return false;
+        const auto it = offsets_.find(t->lba);
+        if (it == offsets_.end())
+            return false;
+        const std::uint64_t pos =
+            it->second + static_cast<std::uint64_t>(lba - t->lba) * t->sector_size;
+        if (std::fseek(f_, static_cast<long>(pos), SEEK_SET) != 0)
+            return false;
+        return std::fread(out, 1, t->sector_size, f_) == t->sector_size;
+    }
+
+    ~CdiDisc() override {
+        if (f_)
+            std::fclose(f_);
+    }
+
+private:
+    static constexpr std::uint32_t kV2 = 0x80000004, kV3 = 0x80000005, kV35 = 0x80000006;
+
+    bool parse(std::string& error) {
+        if (std::fseek(f_, 0, SEEK_END) != 0)
+            return false;
+        const long length = std::ftell(f_);
+        std::uint32_t version = 0, table = 0;
+        if (length < 8 || std::fseek(f_, length - 8, SEEK_SET) != 0 || !u32(version) ||
+            !u32(table)) {
+            error = "file too small for a CDI";
+            return false;
+        }
+        if (version != kV2 && version != kV3 && version != kV35) {
+            error = "unknown CDI version";
+            return false;
+        }
+        std::fseek(f_,
+                   version == kV35 ? length - static_cast<long>(table) : static_cast<long>(table),
+                   SEEK_SET);
+        static const std::uint8_t kMark[10] = {0, 0, 1, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF};
+        std::uint64_t position = 0;
+        unsigned number = 0;
+        std::uint32_t nsessions = 0;
+        if (!u16(nsessions))
+            return truncated(error);
+        for (unsigned s = 1; s <= nsessions; ++s) {
+            std::uint32_t ntracks = 0;
+            if (!u16(ntracks))
+                return truncated(error);
+            for (std::uint32_t i = 0; i < ntracks; ++i) {
+                std::uint32_t v = 0, pregap = 0, sectors = 0, mode = 0, lba = 0, total = 0,
+                              size_code = 0;
+                std::uint8_t mark[20], name_len = 0;
+                if (!u32(v))
+                    return truncated(error);
+                if (v != 0)
+                    skip(8);  // DiscJuggler 3.00.780 and later
+                if (std::fread(mark, 1, 20, f_) != 20 || std::memcmp(mark, kMark, 10) != 0 ||
+                    std::memcmp(mark + 10, kMark, 10) != 0) {
+                    error = "CDI track descriptor without its start mark";
+                    return false;
+                }
+                skip(4);
+                if (std::fread(&name_len, 1, 1, f_) != 1)
+                    return truncated(error);
+                skip(name_len + 11 + 4 + 4);
+                if (!u32(v))
+                    return truncated(error);
+                if (v == 0x80000000u)
+                    skip(8);  // DiscJuggler 4
+                skip(2);
+                if (!u32(pregap) || !u32(sectors))
+                    return truncated(error);
+                skip(6);
+                if (!u32(mode))
+                    return truncated(error);
+                skip(12);
+                if (!u32(lba) || !u32(total))
+                    return truncated(error);
+                skip(16);
+                if (!u32(size_code))
+                    return truncated(error);
+                skip(29);
+                if (version != kV2) {
+                    skip(5);
+                    if (!u32(v))
+                        return truncated(error);
+                    if (v == 0xFFFFFFFFu)
+                        skip(78);
+                }
+                // 2448-byte sectors carry subchannel data; no Dreamcast CDI seen so far uses them.
+                const std::uint32_t size = size_code == 0   ? 2048
+                                           : size_code == 1 ? 2336
+                                           : size_code == 2 ? 2352
+                                                            : 0;
+                if (size == 0 || mode > 2) {
+                    error = "CDI track with an unsupported sector layout";
+                    return false;
+                }
+                Track t;
+                t.number = ++number;
+                t.lba = lba;
+                t.sectors = sectors;
+                t.sector_size = size;
+                t.data = mode != 0;
+                t.mode2 = mode == 2;
+                tracks_.push_back(t);
+                sessions_.push_back(s);
+                offsets_[t.lba] = position + static_cast<std::uint64_t>(pregap) * size;
+                position += static_cast<std::uint64_t>(total) * size;
+            }
+            skip(version != kV2 ? 13 : 12);
+        }
+        if (tracks_.empty()) {
+            error = "CDI lists no tracks";
+            return false;
+        }
+        if (position > static_cast<std::uint64_t>(length)) {
+            error = "CDI tracks run past the end of the file";
+            return false;
+        }
+        return true;
+    }
+
+    bool u16(std::uint32_t& v) {
+        std::uint8_t b[2];
+        if (std::fread(b, 1, 2, f_) != 2)
+            return false;
+        v = b[0] | static_cast<std::uint32_t>(b[1]) << 8;
+        return true;
+    }
+    bool u32(std::uint32_t& v) {
+        std::uint8_t b[4];
+        if (std::fread(b, 1, 4, f_) != 4)
+            return false;
+        v = b[0] | static_cast<std::uint32_t>(b[1]) << 8 | static_cast<std::uint32_t>(b[2]) << 16 |
+            static_cast<std::uint32_t>(b[3]) << 24;
+        return true;
+    }
+    void skip(long n) { std::fseek(f_, n, SEEK_CUR); }
+    static bool truncated(std::string& error) {
+        error = "CDI descriptor table is truncated";
+        return false;
+    }
+
+    FILE* f_ = nullptr;
+    std::map<std::uint32_t, std::uint64_t> offsets_;  // track LBA -> file offset of sector 0
+    std::vector<unsigned> sessions_;                  // the session of each track, as parsed
+};
+
 }  // namespace
 
 std::unique_ptr<Disc> open_disc(const std::filesystem::path& path, std::string& error) {
@@ -349,6 +549,10 @@ std::unique_ptr<Disc> open_disc(const std::filesystem::path& path, std::string& 
     }
     if (ext == ".chd") {
         auto d = std::make_unique<ChdDisc>();
+        return d->open(path, error) ? std::unique_ptr<Disc>(std::move(d)) : nullptr;
+    }
+    if (ext == ".cdi") {
+        auto d = std::make_unique<CdiDisc>();
         return d->open(path, error) ? std::unique_ptr<Disc>(std::move(d)) : nullptr;
     }
     error = "unsupported disc image type: " + ext;

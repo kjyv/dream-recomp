@@ -205,3 +205,59 @@ def chd_path(tmp_path_factory, gdi_path):
     if os.path.exists(FIXTURE_CHD):
         return FIXTURE_CHD
     pytest.skip("no chdman and no committed CHD fixture")
+
+
+def write_cdi(path, sessions) -> None:
+    """A DiscJuggler 3.5 image: ``sessions`` is a list of sessions, each a list of
+    (lba, mode, sector_size, user_sectors) tracks with mode 0 audio, 1 or 2. Data sectors carry
+    their 2048 user bytes the way each layout stores them; a pregap of 150 sectors precedes each
+    track, as DiscJuggler writes it."""
+    codes = {2048: 0, 2336: 1, 2352: 2}
+    mark = bytes([0, 0, 1, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF])
+    pregap = 150
+    body = bytearray()
+    table = bytearray(struct.pack("<H", len(sessions)))
+    for session in sessions:
+        table += struct.pack("<H", len(session))
+        for lba, mode, size, sectors in session:
+            body += bytes(pregap * size)
+            for i, user in enumerate(sectors):
+                if mode == 0:
+                    body += user
+                elif size == 2048:
+                    body += user
+                elif size == 2336:
+                    body += bytes(8) + user + bytes(280)
+                else:
+                    raw = mode1_raw_sector(user, lba + i)
+                    body += raw if mode == 1 else raw[:15] + b"\x02" + bytes(8) + user + bytes(280)
+            name = b"synthetic.cdi"
+            table += struct.pack("<I", 0) + mark + mark + bytes(4)
+            table += bytes([len(name)]) + name + bytes(11 + 4 + 4)
+            table += struct.pack("<I", 0) + bytes(2)
+            table += struct.pack("<II", pregap, len(sectors)) + bytes(6)
+            table += struct.pack("<I", mode) + bytes(12)
+            table += struct.pack("<II", lba, pregap + len(sectors)) + bytes(16)
+            table += struct.pack("<I", codes[size]) + bytes(29)
+            table += bytes(5) + struct.pack("<I", 0)
+        table += bytes(4 + 8 + 1)
+    data = bytes(body) + bytes(table)
+    footer_at = len(data)
+    data += struct.pack("<II", 0x80000006, footer_at + 8 - len(body))
+    with open(path, "wb") as f:
+        f.write(data)
+
+
+CDI_GAME_LBA = 11702
+
+
+@pytest.fixture(scope="session")
+def cdi_path(tmp_path_factory, synthetic_files):
+    """A self-boot style CDI: a small data track in session 1, the game in session 2."""
+    files, _ = synthetic_files
+    iso = files["IP.BIN"] + build_iso(files)[0x8000:]
+    game = [iso[i * 2048:(i + 1) * 2048] for i in range(len(iso) // 2048)]
+    first = [bytes([i]) * 2048 for i in range(20)]
+    path = tmp_path_factory.mktemp("cdi") / "synthetic.cdi"
+    write_cdi(path, [[(0, 2, 2336, first)], [(CDI_GAME_LBA, 2, 2336, game)]])
+    return str(path)

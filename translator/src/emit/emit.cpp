@@ -988,7 +988,11 @@ private:
                 auto it = switches_.find(pc);
                 if (it != switches_.end()) {
                     ++result_.switches_recovered;
-                    out << "        switch (target) {\n";
+                    if (it->second.rebased)  // rebase_to_segment(target, spec_.entry)
+                        out << "        switch (target < 0xE0000000u ? (target & 0x1FFFFFFFu) | "
+                            << hexu(spec_.entry & 0xE0000000u) << " : target) {\n";
+                    else
+                        out << "        switch (target) {\n";
                     std::set<std::uint32_t> seen;
                     for (std::uint32_t t : it->second.targets) {
                         if (!seen.insert(t).second)
@@ -1032,7 +1036,13 @@ private:
                 break;
         }
         out << "    }\n";
-        if (slot_labels_.count(pc + 2)) {
+        if (slot_labels_.count(pc + 2) && blocks_.count(pc + 2)) {
+            // A switch case can make the slot a block of its own, emitted next. Entering there
+            // runs the slot and falls through, as the copy below would. The not-taken path of the
+            // owning branch has run the slot already and must skip that block.
+            if (blocks_.count(pc + 4))
+                out << "    goto " << label(pc + 4) << ";\n";
+        } else if (slot_labels_.count(pc + 2)) {
             // Another branch targets this slot: entering here executes the slot instruction as an
             // ordinary instruction and falls through to pc+4. The not-taken path of the owning
             // branch skips this copy.

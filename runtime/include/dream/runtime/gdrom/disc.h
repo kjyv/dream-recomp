@@ -1,7 +1,8 @@
-// Disc images for the GD-ROM HLE (WP2.6): GDI track sets and CHD (through libchdr), read at the
-// sector level. Layout conventions are the ones tools/dcdisc worked out and tested on real dumps:
-// chdman stores GD-ROM inter-track gaps as PAD frames at the end of the preceding track and CD
-// audio big-endian; a GDI's high-density area starts at LBA 45000.
+// Disc images for the GD-ROM HLE (WP2.6): GDI track sets, CHD (through libchdr) and DiscJuggler
+// CDI, read at the sector level. A CDI is presented as the GD-ROM its game was mastered for. Layout
+// conventions are the ones tools/dcdisc worked out and tested on real dumps: chdman stores GD-ROM
+// inter-track gaps as PAD frames at the end of the preceding track and CD audio big-endian; a GDI's
+// high-density area starts at LBA 45000.
 #pragma once
 
 #include <cstdint>
@@ -22,6 +23,7 @@ struct Track {
     std::uint32_t sectors = 0;  // genuine sectors (gaps excluded)
     std::uint32_t sector_size = 2352;
     bool data = false;
+    bool mode2 = false;  // a raw data sector's user bytes start at 24, not 16
     std::uint32_t end_lba() const noexcept { return lba + sectors; }
 };
 
@@ -55,7 +57,7 @@ protected:
     void finish_tracks();  // sorts, sets the disc type from the layout
 };
 
-// Opens by extension: .gdi or .chd. Returns nullptr and sets `error` on failure.
+// Opens by extension: .gdi, .chd or .cdi. Returns nullptr and sets `error` on failure.
 std::unique_ptr<Disc> open_disc(const std::filesystem::path& path, std::string& error);
 
 }  // namespace dream::gdrom

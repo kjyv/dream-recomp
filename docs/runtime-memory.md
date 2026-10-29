@@ -20,7 +20,8 @@ Virtual address `a`; physical `a & 0x1FFFFFFF`; area = physical bits 28:26.
 | Areas 2, 5, 6, 7 | none | fault log, reads 0 |
 | 0x7C000000–0x7FFFFFFF | 8 KB `ocram` | operand cache as RAM: two 4 KB halves selected by bit 13, mirrored (SH7750 manual) |
 | 0xE0000000–0xE3FFFFFF | two 32-byte store queues | bit 5 selects SQ0/SQ1; readable back |
-| 0xFF000000+ | CCN QACR0/1 (0xFF000038/3C) and CCR handled here; other modules via `map_p4` | TMU, INTC, DMAC, SCIF arrive with WP2.2/2.6 |
+| 0xF6000000–0xF7FFFFFF | UTLB address and data arrays | 64 entries, entry n at offset n << 8; used only to translate store-queue flushes |
+| 0xFF000000+ | CCN MMUCR (0xFF000010), QACR0/1 (0xFF000038/3C) and CCR handled here; other modules via `map_p4` | TMU, INTC, DMAC, SCIF arrive with WP2.2/2.6 |
 
 ## Store queues
 
@@ -29,6 +30,16 @@ area) writes the 32 bytes to physical `(QACRn.AREA << 26) | (a & 0x03FFFFE0)`, w
 both selects the queue and stays in the destination. A destination in RAM or VRAM is a 32-byte copy;
 a destination in a device (the TA FIFO) calls `MmioHandler::write_burst`, so the polygon path sees
 whole 32-byte submissions.
+
+With MMUCR.AT set, the UTLB maps the store-queue address instead and QACR is not used (SH7750
+manual 4.6). Katana's Shinobi does this when a title turns the MMU on: `sySqInit` writes 1 MB
+entries from 0xE0000000 onto RAM and from 0xE1000000 onto the TA FIFO through the UTLB arrays, and
+leaves QACR at 0. Ikaruga's display lists and textures all go this way; without the translation they
+landed at 0x01000000 and the title waited forever for a texture transfer. The arrays store what is
+written, MMUCR.TI clears the valid bits, and `translate` honours the 1 KB, 4 KB, 64 KB and 1 MB page
+sizes without comparing ASIDs. A flush that no entry maps raises a TLB miss on hardware; here it
+takes the QACR route and counts in `sq_tlb_misses`, which the launcher's report prints. Ordinary
+loads and stores are not translated.
 
 ## Devices and faults
 

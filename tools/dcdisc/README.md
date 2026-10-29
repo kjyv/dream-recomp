@@ -26,7 +26,11 @@ pip install -e "tools/dcdisc[test]"    # plus pytest and pycdlib for the synthet
 | `dcdisc doctor` | Whether this machine can build and run the project: CMake, compiler, submodule, CHD backend, and the optional Vulkan/SDL3/glslc/clang-format |
 | `dcdisc shortlist IMAGE [IMAGE...]` | One row per disc: boot size, code-file count, streaming volume, WinCE, Katana banners. For choosing a baseline title from a pile of dumps |
 
-`IMAGE` is a `.gdi` or a `.chd`. Add `--chdman` to force the chdman backend for a CHD.
+`IMAGE` is a `.gdi`, a `.chd` or a `.cdi`. Add `--chdman` to force the chdman backend for a CHD.
+
+A `.cdi` is a DiscJuggler image of a self-boot CD-R. The game is in the last session, and `extract`
+and `ls` read its first data track. A CD-R copy of a commercial game usually has a patched
+`1ST_READ.BIN` ("binhack") that reads from that session. Prefer a GD-ROM dump.
 
 ## CHD backends
 

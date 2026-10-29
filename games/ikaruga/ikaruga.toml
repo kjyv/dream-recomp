@@ -1,0 +1,66 @@
+# Ikaruga, T38706M
+# Written by `dcdisc new-game`. Everything here is read off the disc or is the standard Katana
+# layout; nothing from the disc itself is ever committed.
+
+[game]
+id = "ikaruga"
+title = "Ikaruga"
+region = "Japan"
+product = "T38706M"
+
+[disc]
+image = "disc/Ikaruga (Japan).chd"
+
+[binary]
+path = "extracted/fs/1ST_READ.BIN"
+load_address = 0x8C010000    # where the console's BIOS loads the file
+link_address = 0x0C010000    # the same RAM through a different address; what the code assumes
+entry = 0x8C010000           # the first instruction
+
+# Addresses discovery does not reach, and regions the program copies and runs elsewhere, both go
+# here. Run the launcher with --suggest-config FILE and it writes them for you.
+[functions]
+# Katana SDK function names, found by matching the code of the SDK's libraries against the binary.
+# The source column names the SDK release that matched.
+symbols = "symbols.tsv"
+# Entries that only a pointer in RAM reaches. Each one is a hole: no function contains it, and it
+# starts with a prologue after the previous function's literal pool.
+extra = [
+    # An object update callback, which fn_0c066e38 calls through the object list at 0x8C15C594.
+    # Its address is in the image at 0x8C091494, but discovery rejected that pointer. Without this
+    # seed, a release build faults on it at the first boss of stage 1.
+    0x0C08EC88,
+    # A stub that jumps to fn_0c0a0160, reached through the table at 0x8C0DB134. Stage 2 calls it.
+    0x0C0A01A0,
+]
+
+# Exception and interrupt vectors. The startup code sets VBR to 0x8C000000 and copies these handlers
+# there. 0x0C043EB0 jumps to VBR+0 at the end of each interrupt. Found by --suggest-config.
+[[relocations]]   # VBR+0x000, the handler the interrupt path chains to
+source = 0x0C043BFC
+size = 0x34
+dest = 0x8C000000
+entry = 0x8C000000
+
+[[relocations]]   # VBR+0x100, general exceptions
+source = 0x0C043B68
+size = 0x34
+dest = 0x8C000100
+entry = 0x8C000100
+
+[[relocations]]   # VBR+0x400, TLB miss, the same code as VBR+0x100
+source = 0x0C043B68
+size = 0x34
+dest = 0x8C000400
+entry = 0x8C000400
+
+[[relocations]]   # VBR+0x600, interrupts
+source = 0x0C043BA0
+size = 0x58
+dest = 0x8C000600
+entry = 0x8C000600
+
+# --suggest-config also lists copies of 0x0C0CA7F0 (0x44 bytes) and 0x0C0CA450 (0x30 bytes) at
+# changing addresses near 0x8C00EE00. Neither is code: the first is a table of float constants that
+# kmSetUserClipping copies into a local array on its stack, the second a table of 12 small integers
+# copied the same way. Do not add them.

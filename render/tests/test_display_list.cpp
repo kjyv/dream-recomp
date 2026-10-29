@@ -96,6 +96,35 @@ TEST_CASE("display list: a packed-colour triangle strip becomes one polygon") {
     CHECK(f.unknown_parameters == 0);
 }
 
+TEST_CASE("display list: a polygon keeps the user clip rectangle and its clip mode") {
+    Stream s;
+    Pcw clip;
+    clip.para_type = 1;  // user tile clip: tiles 4 to 15 across, 0 to 14 down, both inclusive
+    s.chunk({clip.word(), 0, 0, 0, 4, 0, 15, 14});
+    Pcw header;
+    const u32 inside = 2u << 16;  // parameter control word: User_Clip, draw inside the rectangle
+    s.chunk({header.word() | inside, 0, 0, 0});
+    packed_vertex(s, 10, 20, 0.5f, 0xFF112233u, false);
+    packed_vertex(s, 30, 20, 0.5f, 0xFF445566u, false);
+    packed_vertex(s, 20, 40, 0.25f, 0xFF778899u, true);
+    Pcw eol;
+    eol.para_type = 0;
+    s.chunk({eol.word()});
+
+    DisplayList dl;
+    s.feed(dl);
+    const Frame& f = dl.frame();
+
+    REQUIRE(f.lists[0].size() == 1);
+    const Polygon& p = f.lists[0][0];
+    CHECK(p.tile_clip == 2);
+    CHECK(p.clip_x0 == 128);
+    CHECK(p.clip_y0 == 0);
+    CHECK(p.clip_x1 == 512);
+    CHECK(p.clip_y1 == 480);
+    CHECK(f.unknown_parameters == 0);
+}
+
 TEST_CASE("display list: strips are split at end-of-strip and lists are kept apart") {
     Stream s;
     Pcw opaque;
@@ -278,6 +307,86 @@ TEST_CASE("display list: intensity mode 2 keeps the previous face colour and a 3
     REQUIRE(f.lists[0].size() == 2);
     CHECK(f.lists[0][1].count == 3);
     CHECK(f.vertices[3].base == 0xFFFF8000u);  // the first polygon's face colour, still in force
+}
+
+TEST_CASE("display list: an untextured intensity vertex keeps its intensity in word 6") {
+    // A single-volume vertex does not use words 4 and 5 when it has no texture. Ikaruga's title
+    // screen puts unrelated values there, and reading word 4 darkened every second vertex.
+    Stream s;
+    Pcw header;
+    header.col_type = 2;
+    s.chunk({header.word(), 0, 0, 0, f2u(1.0f), f2u(1.0f), f2u(0.5f), f2u(0.0f)});
+    for (int i = 0; i < 3; ++i) {
+        Pcw v;
+        v.para_type = 7;
+        v.col_type = 2;
+        v.end_of_strip = i == 2 ? 1u : 0u;
+        s.chunk({v.word(), f2u(static_cast<float>(i)), f2u(0), f2u(1), f2u(0.25f), f2u(0.125f),
+                 f2u(i == 0 ? 1.0f : 0.5f), 0});
+    }
+
+    DisplayList dl;
+    s.feed(dl);
+    const Frame& f = dl.frame();
+    REQUIRE(f.vertices.size() == 3);
+    CHECK(f.vertices[0].base == 0xFFFF8000u);
+    CHECK(((f.vertices[1].base >> 16) & 0xFFu) == 0x80u);
+    CHECK(f.vertices[0].offset == 0u);
+}
+
+TEST_CASE("display list: an untextured two-volume vertex keeps its first intensity in word 4") {
+    // Two volumes make the header 64 bytes, with the first volume's face colour in the second
+    // half. The vertex stays 32 bytes, with the two volumes' intensities in words 4 and 5.
+    Stream s;
+    Pcw header;
+    header.col_type = 2;
+    header.volume = 1;
+    s.chunk({header.word(), 0, 0, 0});
+    s.chunk(
+        {f2u(1.0f), f2u(1.0f), f2u(0.5f), f2u(0.0f), f2u(1.0f), f2u(0.0f), f2u(0.0f), f2u(1.0f)});
+    for (int i = 0; i < 3; ++i) {
+        Pcw v;
+        v.para_type = 7;
+        v.col_type = 2;
+        v.volume = 1;
+        v.end_of_strip = i == 2 ? 1u : 0u;
+        s.chunk({v.word(), f2u(static_cast<float>(i)), f2u(0), f2u(1), f2u(i == 0 ? 1.0f : 0.5f),
+                 f2u(0.25f), f2u(0.125f), 0});
+    }
+
+    DisplayList dl;
+    s.feed(dl);
+    const Frame& f = dl.frame();
+    REQUIRE(f.vertices.size() == 3);
+    CHECK(f.vertices[0].base == 0xFFFF8000u);
+    CHECK(((f.vertices[1].base >> 16) & 0xFFu) == 0x80u);
+}
+
+TEST_CASE("display list: an untextured two-volume vertex keeps its first packed colour in word 4") {
+    // Header and vertex are both 32 bytes. Word 5 holds the second volume's colour, and an
+    // untextured vertex has no offset colour even when the offset bit is set.
+    Stream s;
+    Pcw header;
+    header.volume = 1;
+    header.offset = 1;
+    s.chunk({header.word(), 0, 0, 0});
+    for (int i = 0; i < 3; ++i) {
+        Pcw v;
+        v.para_type = 7;
+        v.volume = 1;
+        v.offset = 1;
+        v.end_of_strip = i == 2 ? 1u : 0u;
+        s.chunk({v.word(), f2u(static_cast<float>(i)), f2u(0), f2u(1), 0xFF112233u, 0xFF445566u,
+                 0xFF778899u, 0x80AABBCCu});
+    }
+
+    DisplayList dl;
+    s.feed(dl);
+    const Frame& f = dl.frame();
+    REQUIRE(f.vertices.size() == 3);
+    CHECK(f.vertices[0].base == 0xFF112233u);
+    CHECK(f.vertices[2].base == 0xFF112233u);
+    CHECK(f.vertices[0].offset == 0u);
 }
 
 TEST_CASE("display list: floating-point colours come from the vertex's second half") {

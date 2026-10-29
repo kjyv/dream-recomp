@@ -95,6 +95,70 @@ bool constant_in(const Image& img, std::uint32_t lo, std::uint32_t pc, unsigned 
     return false;
 }
 
+// The number of cases the index check before a table load admits, or 0 when there is none. SHC
+// compares the index with a constant (`mov #n,Rm ; cmp/hi Rm,Ri` admits n + 1 cases, `cmp/hs`
+// admits n) and branches to the default, often a block or two before the load, so this scans
+// straight back across branches. Without the bound the entry scan runs on into the code or the
+// literal pool after the table and takes a function pointer there for a case.
+unsigned table_bound(const Image& img, std::uint32_t from, unsigned idx) {
+    const std::uint32_t lo = from >= 64 ? from - 64 : 0;
+    for (std::uint32_t p = from; p > lo && img.contains(p - 2, 2);) {
+        p -= 2;
+        const Instr i = at(img, p);
+        switch (i.op) {
+            case Op::RTS:
+            case Op::RTE:
+            case Op::JMP:
+            case Op::BRAF:
+                return 0;  // the start of this dispatch lies after p
+            case Op::BT:
+            case Op::BF:
+            case Op::BT_S:
+            case Op::BF_S:
+            case Op::BRA:
+            case Op::BSR:
+            case Op::NOP:
+            case Op::MOVA:
+            case Op::CMP_PZ:
+            case Op::CMP_PL:
+            case Op::CMP_EQ_I:
+            case Op::TST_I:
+                continue;  // no Rn, or reads it only
+            case Op::AND_I:
+            case Op::OR_I:
+            case Op::XOR_I:
+                if (idx == 0)
+                    return 0;
+                continue;
+            case Op::CMP_HI:
+            case Op::CMP_HS:
+            case Op::CMP_GT:
+            case Op::CMP_GE: {
+                if (i.n != idx)
+                    continue;
+                std::uint32_t limit = 0;
+                if (!constant_in(img, lo, p, i.m, limit) || limit > 0x7FFF)
+                    return 0;
+                return i.op == Op::CMP_HI || i.op == Op::CMP_GT ? limit + 1 : limit;
+            }
+            case Op::MOV:
+            case Op::EXTU_B:
+            case Op::EXTU_W:
+                if (i.n == idx)
+                    idx = i.m;  // the compare tested the value this copies
+                continue;
+            case Op::SHLL:
+            case Op::SHLL2:
+                continue;  // scaling the index for the table comes after the compare
+            default:
+                if (i.n == idx)
+                    return 0;  // the index is defined here without a compare in between
+                continue;
+        }
+    }
+    return 0;
+}
+
 }  // namespace
 
 bool recover_switch(const Image& img, std::uint32_t block_start, std::uint32_t jump_pc,
@@ -206,12 +270,18 @@ bool recover_switch(const Image& img, std::uint32_t block_start, std::uint32_t j
     // as base with the scaled index in Rm; SHC: `mov.l tbl,Rm` with the index in r0).
     std::uint32_t base = 0;
     bool have_base = false;
+    unsigned index_reg = 0;
     if (def.m != 0 && constant_in(img, block_start, def_pc, def.m, base))
         have_base = true;
-    if (!have_base && constant_in(img, block_start, def_pc, 0, base))
+    if (!have_base && constant_in(img, block_start, def_pc, 0, base)) {
         have_base = true;
+        index_reg = def.m;
+    }
     if (!have_base)
         return false;
+    if (const unsigned bound = table_bound(img, def_pc, index_reg);
+        bound != 0 && bound < max_entries)
+        max_entries = bound;
     if (table_relative && base_reg_for_add != def.m && base_reg_for_add != 0) {
         std::uint32_t b2;
         if (constant_in(img, block_start, def_pc, base_reg_for_add, b2))
@@ -220,6 +290,7 @@ bool recover_switch(const Image& img, std::uint32_t block_start, std::uint32_t j
     out.table = base;
     out.relative_to_pc = jump.op == Op::BRAF;
     out.relative_to_table = table_relative;
+    out.rebased = false;
     out.targets.clear();
 
     for (unsigned k = 0; k < max_entries; ++k) {
@@ -238,13 +309,16 @@ bool recover_switch(const Image& img, std::uint32_t block_start, std::uint32_t j
             target = jump_pc + 4 + static_cast<std::uint32_t>(entry);
         else if (out.relative_to_table)
             target = base + static_cast<std::uint32_t>(entry);
-        else
-            target = static_cast<std::uint32_t>(entry);
+        else  // SHC writes P1 addresses into the table, whatever segment the image is linked at
+            target = rebase_to_segment(static_cast<std::uint32_t>(entry), range_lo);
         if (target < range_lo || target >= range_hi || (target & 1))
             break;
         // A table entry that lands on the table itself is a data word, not a target.
         if (target >= base && target < base + (k + 1) * out.entry_size)
             break;
+        if (target != static_cast<std::uint32_t>(entry) && !out.relative_to_pc &&
+            !out.relative_to_table)
+            out.rebased = true;
         out.targets.push_back(target);
     }
     return !out.targets.empty();

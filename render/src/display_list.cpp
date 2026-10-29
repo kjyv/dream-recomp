@@ -190,8 +190,15 @@ void DisplayList::feed(const std::uint32_t w[8]) {
             close_list();
             return;
         case kUserTileClip:
+            // Tile numbers, both bounds inclusive.
+            // Reference: Flycast's ta_vtx.cpp (GPL-2.0, ADR 1).
+            clip_x0_ = static_cast<std::uint16_t>((w[4] & 63u) * 32u);
+            clip_y0_ = static_cast<std::uint16_t>((w[5] & 31u) * 32u);
+            clip_x1_ = static_cast<std::uint16_t>(((w[6] & 63u) + 1u) * 32u);
+            clip_y1_ = static_cast<std::uint16_t>(((w[7] & 31u) + 1u) * 32u);
+            return;
         case kObjectListSet:
-            return;  // clipping and object-list placement do not affect what is drawn here
+            return;  // object-list placement does not affect what is drawn here
         case kPolygonOrModVol:
         case kSprite:
             handle_header(w);
@@ -244,6 +251,10 @@ void DisplayList::handle_header(const std::uint32_t w[8]) {
     current_.tsp = w[2];
     current_.tcw = w[3];
     current_.tile_clip = pcw_user_clip(pcw);
+    current_.clip_x0 = clip_x0_;
+    current_.clip_y0 = clip_y0_;
+    current_.clip_x1 = clip_x1_;
+    current_.clip_y1 = clip_y1_;
     current_.first = static_cast<u32>(frame_.vertices.size());
 
     if (pcw_para_type(pcw) == kSprite) {
@@ -292,12 +303,19 @@ void DisplayList::handle_vertex(const std::uint32_t w[8], bool have_second_half,
 
     const u32 col = pcw_col_type(pcw);
     const bool textured = pcw_texture(pcw) != 0;
-    const bool offset = pcw_offset(pcw) != 0;
+    // Only a textured vertex has an offset colour. In an untextured one, the word after the base
+    // colour is unused or holds the second volume's colour.
+    const bool offset = textured && pcw_offset(pcw) != 0;
     const bool uv_short = pcw_uv_16bit(pcw) != 0;
 
-    // Words 4 and 5 are the texture coordinates when textured; otherwise they are ignored.
-    unsigned next = 4;
-    if (textured) {
+    // Words 4 and 5 are the texture coordinates when textured. An untextured single-volume vertex
+    // does not use them and keeps its colour in word 6 (KMVERTEX0, KMVERTEX2), as a textured one
+    // does. Only the untextured two-volume vertex (KMVERTEX9, KMVERTEX10) starts its colours at
+    // word 4.
+    unsigned next = 6;
+    if (!textured && pcw_volume(pcw)) {
+        next = 4;
+    } else if (textured) {
         if (uv_short) {
             // 16-bit coordinates share one word, v in the low half and u in the high half.
             v.v = uv16(w[4] & 0xFFFFu);
@@ -312,8 +330,8 @@ void DisplayList::handle_vertex(const std::uint32_t w[8], bool have_second_half,
 
     switch (col) {
         case kPacked:
-            v.base = w[6];
-            v.offset = offset ? w[7] : 0;
+            v.base = w[next];
+            v.offset = offset ? w[next + 1] : 0;
             break;
         case kFloating:
             if (have_second_half) {

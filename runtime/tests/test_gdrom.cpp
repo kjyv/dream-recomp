@@ -1,5 +1,9 @@
+#include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
+#include <vector>
 
 #include "dream/runtime/gdrom/disc.h"
 
@@ -65,4 +69,96 @@ TEST_CASE("disc: unsupported and missing images report errors") {
     CHECK(err.find("unsupported") != std::string::npos);
     CHECK(open_disc("/nonexistent/x.chd", err) == nullptr);
     CHECK(!err.empty());
+}
+
+namespace {
+
+// A DiscJuggler 3.5 image with two sessions of mode 2 data in 2336-byte sectors: a dummy track at
+// LBA 0, and the game at `game_lba`, whose sectors hold their LBA in their first user word. Laid
+// out the way cdirip reads it, with a 150-sector pregap in front of each track.
+std::filesystem::path write_cdi(std::uint32_t game_lba, std::uint32_t sectors) {
+    const auto path = std::filesystem::temp_directory_path() / "dream_test_synthetic.cdi";
+    std::vector<std::uint8_t> body, table;
+    auto u16 = [&](std::uint32_t v) {
+        table.push_back(static_cast<std::uint8_t>(v));
+        table.push_back(static_cast<std::uint8_t>(v >> 8));
+    };
+    auto u32 = [&](std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) table.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+    };
+    auto zeros = [&](std::size_t n) { table.insert(table.end(), n, 0); };
+    const std::uint8_t mark[10] = {0, 0, 1, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF};
+    const std::uint32_t pregap = 150;
+    u16(2);
+    for (const std::uint32_t lba : {0u, game_lba}) {
+        u16(1);
+        body.insert(body.end(), pregap * 2336, 0);
+        for (std::uint32_t i = 0; i < sectors; ++i) {
+            std::uint8_t sector[2336] = {};
+            const std::uint32_t v = lba + i;
+            std::memcpy(sector + 8, &v, 4);
+            body.insert(body.end(), sector, sector + sizeof sector);
+        }
+        u32(0);
+        table.insert(table.end(), mark, mark + 10);
+        table.insert(table.end(), mark, mark + 10);
+        zeros(4);
+        table.push_back(0);  // no file name
+        zeros(11 + 4 + 4);
+        u32(0);
+        zeros(2);
+        u32(pregap);
+        u32(sectors);
+        zeros(6);
+        u32(2);  // mode 2
+        zeros(12);
+        u32(lba);
+        u32(pregap + sectors);
+        zeros(16);
+        u32(1);  // 2336-byte sectors
+        zeros(29 + 5);
+        u32(0);
+        zeros(4 + 8 + 1);
+    }
+    const std::uint32_t from_end = static_cast<std::uint32_t>(table.size() + 8);
+    u32(0x80000006u);
+    u32(from_end);
+    std::FILE* f = std::fopen(path.string().c_str(), "wb");
+    std::fwrite(body.data(), 1, body.size(), f);
+    std::fwrite(table.data(), 1, table.size(), f);
+    std::fclose(f);
+    return path;
+}
+
+}  // namespace
+
+TEST_CASE("cdi: a self-boot image is presented as the GD-ROM its game was made for") {
+    const auto path = write_cdi(11702, 40);
+    std::string err;
+    auto disc = open_disc(path, err);
+    REQUIRE_MESSAGE(disc != nullptr, err);
+    CHECK(disc->type() == DiscType::GdRom);
+    REQUIRE(disc->tracks().size() == 3);
+    CHECK(disc->tracks()[0].lba == 0);
+    CHECK(disc->tracks()[0].sectors == 40);
+    CHECK(disc->tracks()[1].sectors == 0);  // the placeholder for the second low-density track
+    CHECK(disc->tracks()[2].number == 3);
+    CHECK(disc->tracks()[2].lba == 11702);
+    CHECK(disc->hd_track()->number == 3);
+    std::uint8_t sector[2048];
+    std::uint32_t word = 0;
+    REQUIRE(disc->read_user(11702 + 7, sector));
+    std::memcpy(&word, sector, 4);
+    CHECK(word == 11702 + 7);
+    REQUIRE(disc->read_user(3, sector));
+    std::memcpy(&word, sector, 4);
+    CHECK(word == 3);
+    CHECK(!disc->read_user(11702 + 40, sector));
+    std::uint32_t toc[102];
+    disc->toc(1, toc);
+    CHECK(toc[2] == (0x41u << 24 | (11702u + 150u)));
+    CHECK(toc[99] == (0x41u << 24 | (3u << 16)));
+    CHECK(toc[101] == (0x41u << 24 | (11742u + 150u)));
+    disc.reset();
+    std::filesystem::remove(path);
 }

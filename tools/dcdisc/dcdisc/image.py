@@ -102,7 +102,7 @@ class DiscImage:
 
 
 def open_image(path: str, prefer_chdman: bool = False) -> DiscImage:
-    """Open a .gdi or .chd by extension."""
+    """Open a .gdi, .chd or .cdi by extension."""
     ext = os.path.splitext(path)[1].lower()
     if ext == ".gdi":
         from .gdi import GdiImage
@@ -110,4 +110,7 @@ def open_image(path: str, prefer_chdman: bool = False) -> DiscImage:
     if ext == ".chd":
         from .chd import open_chd
         return open_chd(path, prefer_chdman=prefer_chdman)
-    raise ValueError(f"unsupported image type {ext!r}; expected .gdi or .chd")
+    if ext == ".cdi":
+        from .cdi import CdiImage
+        return CdiImage(path)
+    raise ValueError(f"unsupported image type {ext!r}; expected .gdi, .chd or .cdi")
